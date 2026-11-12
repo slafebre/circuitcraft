@@ -1,0 +1,14 @@
+[package]
+name = "circuitcraft-render"
+description = "Layer colours and display lists, independent of any UI toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-model = { workspace = true }

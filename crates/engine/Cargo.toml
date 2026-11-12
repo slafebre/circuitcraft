@@ -1,0 +1,19 @@
+[package]
+name = "circuitcraft-engine"
+description = "Sessions and the command registry: every user action is a command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-model = { workspace = true }
+circuitcraft-io = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

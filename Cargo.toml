@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# internal (layers are enforced by `cargo xtask layers`; see xtask/src/layers.rs)
+circuitcraft-units = { path = "crates/units" }
+circuitcraft-geom = { path = "crates/geom" }
+circuitcraft-model = { path = "crates/model" }
+circuitcraft-render = { path = "crates/render" }
+circuitcraft-io = { path = "crates/io" }
+circuitcraft-engine = { path = "crates/engine" }
+circuitcraft-ui-egui = { path = "crates/ui-egui" }
+circuitcraft-mcp = { path = "crates/mcp" }
+
+# foundation
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+# ui
+egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
+eframe = { version = "0.37", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 0

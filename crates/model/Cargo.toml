@@ -1,0 +1,16 @@
+[package]
+name = "circuitcraft-model"
+description = "The design database: project, board, layer stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-units = { workspace = true }
+circuitcraft-geom = { workspace = true }
+serde = { workspace = true }

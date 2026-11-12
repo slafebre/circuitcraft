@@ -1,0 +1,15 @@
+[package]
+name = "circuitcraft-io"
+description = "File format detection, import and export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-model = { workspace = true }
+thiserror = { workspace = true }

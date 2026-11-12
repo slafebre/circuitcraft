@@ -1,0 +1,16 @@
+[package]
+name = "circuitcraft-mcp"
+description = "Model Context Protocol server over the engine's commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-engine = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
