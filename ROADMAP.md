@@ -141,11 +141,16 @@ panelization, our own simulator behind the simulator interface.
 | EAGLE format documentation | Check the terms of the published DTD and documentation | 0.1 |
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
-| Licences outside the allowlist, pulled in by egui/eframe | `Unicode-3.0` (ICU crates, 18), `Zlib` (foldhash, slotmap, zlib-rs), `BSL-1.0` (clipboard-win, error-code; Windows clipboard). Accept as exceptions, or drop eframe's `clipboard`/`links` features where they're the cause | 0.1 |
 | Polygon booleans | A permissively licensed library (Clipper2 is BSL-1.0, which is not on the Craft allowlist) | 0.1 |
 | Altium format work | Legal advice on studying Altium files made with your own licence, before any work starts | after 1.0 |
 | Altium reference install | A licence for black-box observation, with screenshots kept out of the repository | 0.3 |
 | Test corpus | A separate `circuitcraft-corpus` repository of permissively licensed EAGLE and KiCad designs | 0.1 |
+
+## Decided
+
+| Date | Decision |
+|---|---|
+| 2026-11-13 | Accept the licences egui and eframe pull in outside the allowlist, per crate: `Unicode-3.0` (ICU4X and Unicode data crates), `Zlib` (foldhash, slotmap, zlib-rs), `BSL-1.0` (clipboard-win, error-code). `cargo xtask licenses` enforces the list in `xtask/src/licenses.rs` |
 
 ## Risks
 
@@ -175,3 +180,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 |---|---|
 | 2026-11-12 | First version: audience, milestones 0.1 to 1.0, open decisions and risks |
 | 2026-11-13 | Workspace scaffold landed; stage moved to 0.1 in progress |
+| 2026-11-13 | egui licence exceptions accepted; licence check added to CI |

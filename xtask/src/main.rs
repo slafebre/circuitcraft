@@ -3,6 +3,7 @@
 
 mod assets;
 mod layers;
+mod licenses;
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -10,10 +11,11 @@ use std::process::{Command, ExitCode};
 const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
-  ci       fmt, clippy, test, assets, layers, wasm (what CI runs)
+  ci       fmt, clippy, test, assets, licenses, layers, wasm (what CI runs)
   test     cargo test --workspace
   layers   check the crate layering (xtask/src/layers.rs)
   assets   check that every asset file has a row in ATTRIBUTION.md
+  licenses check every dependency's licence against the allowlist (xtask/src/licenses.rs)
   wasm     check that the browser build compiles";
 
 fn main() -> ExitCode {
@@ -23,6 +25,7 @@ fn main() -> ExitCode {
         Some("test") => cmd_test(),
         Some("layers") => cmd_layers(),
         Some("assets") => assets::run(&root()),
+        Some("licenses") => cmd_licenses(),
         Some("wasm") => cmd_wasm(),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
@@ -63,12 +66,26 @@ fn cmd_test() -> Result<(), String> {
     run(c, "cargo test --workspace")
 }
 
-fn cmd_layers() -> Result<(), String> {
-    let out = cargo().args(["metadata", "--format-version", "1", "--no-deps"]).output().map_err(|e| format!("cargo metadata: {e}"))?;
+/// `cargo metadata` as JSON: the workspace only, or (`no_deps == false`) the whole dependency graph.
+fn metadata(no_deps: bool) -> Result<serde_json::Value, String> {
+    let mut c = cargo();
+    c.args(["metadata", "--format-version", "1"]);
+    if no_deps {
+        c.arg("--no-deps");
+    }
+    let out = c.output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
         return Err(format!("cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
-    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata output: {e}"))?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata output: {e}"))
+}
+
+fn cmd_licenses() -> Result<(), String> {
+    licenses::check(&metadata(false)?)
+}
+
+fn cmd_layers() -> Result<(), String> {
+    let meta = metadata(true)?;
     let crates = layers::from_metadata(&meta)?;
     let violations = layers::check(&crates);
     if violations.is_empty() {
@@ -119,8 +136,15 @@ fn cmd_ci() -> Result<(), String> {
     fn assets_step() -> Result<(), String> {
         assets::run(&root())
     }
-    let steps: [Step; 6] =
-        [("fmt", fmt), ("clippy", clippy), ("test", cmd_test), ("assets", assets_step), ("layers", cmd_layers), ("wasm", cmd_wasm)];
+    let steps: [Step; 7] = [
+        ("fmt", fmt),
+        ("clippy", clippy),
+        ("test", cmd_test),
+        ("assets", assets_step),
+        ("licenses", cmd_licenses),
+        ("layers", cmd_layers),
+        ("wasm", cmd_wasm),
+    ];
     for (i, (name, step)) in steps.iter().enumerate() {
         eprintln!("\n=== ci: {name} ===");
         if let Err(e) = step() {
