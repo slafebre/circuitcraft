@@ -74,7 +74,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "Outline from Drawings",
         menu: Some("Design/Outline from Drawings"),
         shortcut: None,
-        params: r#"{"gap"?: mm (0.001, at most 1)} -> {"used", "cutouts"} (joins the lines and arcs on the outline layer whose ends are within gap; the largest closed shape becomes the board outline and the others, which must start inside it, its cutouts, replacing any the board had, and the drawings are removed; refused when a drawing on the layer is part of no closed shape)"#,
+        params: r#"{"gap"?: mm (0.001, at most 1)} -> {"used", "cutouts"} (joins the lines and arcs on the outline layer whose ends are within gap; the largest closed shape becomes the board outline and the others, which must lie wholly inside it (curves compared to within 0.02 mm), its cutouts, replacing any the board had, and the drawings are removed; refused when a drawing on the layer is part of no closed shape)"#,
         run: outline_assemble,
     },
     CommandSpec {

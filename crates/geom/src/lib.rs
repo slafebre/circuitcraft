@@ -16,7 +16,7 @@ mod contour;
 mod region;
 
 pub use arc::{Arc, Circle};
-pub use chain::{CHAIN_TOLERANCE, Loop, Piece, chain, ring_contains};
+pub use chain::{CHAIN_TOLERANCE, Loop, Piece, chain, ring_within};
 pub use circuitcraft_units::{Nm, Point, UnitError};
 pub use contour::{Contour, Edge, Polygon, area2};
 pub use region::{BoolOp, FillRule, boolean, offset, simplify, stroke};
@@ -88,6 +88,11 @@ impl Rect {
         self.including(other.min).including(other.max)
     }
 
+    /// Whether the two rectangles share a point, an edge or a corner included.
+    pub fn overlaps(self, other: Rect) -> bool {
+        self.min.x <= other.max.x && other.min.x <= self.max.x && self.min.y <= other.max.y && other.min.y <= self.max.y
+    }
+
     /// Whether `p` lies inside or on the edge.
     pub fn contains(self, p: Point) -> bool {
         (self.min.x..=self.max.x).contains(&p.x) && (self.min.y..=self.max.y).contains(&p.y)
@@ -130,6 +135,9 @@ mod tests {
         assert!(r.contains(p(4, 2)));
         assert!(!r.contains(p(5, 0)));
         assert_eq!(r.union(Rect::from_corners(p(9, 9), p(8, 8))).max, p(9, 9));
+        let overlaps = |a: (i64, i64), b: (i64, i64)| r.overlaps(Rect::from_corners(p(a.0, a.1), p(b.0, b.1)));
+        assert!(overlaps((1, 0), (2, 1)) && overlaps((4, 2), (9, 9)) && overlaps((-5, -5), (9, 9)) && overlaps((2, -9), (2, 9)));
+        assert!(!overlaps((5, 0), (9, 1)) && !overlaps((0, 3), (4, 9)) && !overlaps((-9, 0), (-1, 1)) && !overlaps((0, -9), (4, -4)));
     }
 
     #[test]

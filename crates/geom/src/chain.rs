@@ -5,7 +5,7 @@
 //! the order or the direction the pieces were drawn in.
 
 use crate::arc::orientation;
-use crate::{Arc, Contour, Edge, GeomError, MAX_POINTS, area2, check_point};
+use crate::{Arc, Contour, Edge, GeomError, MAX_POINTS, Rect, area2, check_point};
 use circuitcraft_units::{MAX_ABS, Nm, Point};
 use std::collections::BTreeMap;
 
@@ -58,10 +58,14 @@ pub const CHAIN_TOLERANCE: Nm = Nm(10_000);
 /// its two ends. Pieces in an open chain, pieces shorter than `gap` and outlines that enclose no
 /// area are left out; the caller sees which by the indices no [`Loop`] lists.
 ///
-/// The cost is linear in the number of pieces, however they crowd together.
+/// The cost is linear in the number of pieces, however they crowd together, and there can be
+/// at most [`MAX_POINTS`] of them.
 pub fn chain(pieces: &[Piece], gap: Nm) -> Result<Vec<Loop>, GeomError> {
     if !(0..=MAX_ABS).contains(&gap.0) {
         return Err(GeomError::OutOfRange);
+    }
+    if pieces.len() > MAX_POINTS {
+        return Err(GeomError::TooManyPoints);
     }
     let mut budget = MAX_POINTS;
     let mut loops = Vec::new();
@@ -253,14 +257,67 @@ fn canonical(contour: Contour, reverse: bool) -> Contour {
     Contour { start, edges }
 }
 
+/// Whether the closed ring `inner` lies wholly inside the closed ring `outer`, touching it
+/// nowhere: one of its corners is strictly inside, and none of its edges meets an edge of `outer`.
+///
+/// `work` is how many comparisons the caller can still afford: each corner of `outer` costs one,
+/// and each edge of `outer` that comes near `inner` costs one per edge of `inner`. When it runs
+/// out the answer is [`GeomError::TooManyPoints`], so many rings checked against one outline take
+/// a bounded time together.
+pub fn ring_within(inner: &[Point], outer: &[Point], work: &mut usize) -> Result<bool, GeomError> {
+    let (Some(&corner), Some(bounds)) = (inner.first(), Rect::bounding(inner.iter().copied())) else {
+        return Ok(false);
+    };
+    let mut spend = |n: usize| {
+        *work = work.checked_sub(n).ok_or(GeomError::TooManyPoints)?;
+        Ok::<(), GeomError>(())
+    };
+    spend(outer.len())?;
+    if !ring_contains(outer, corner) {
+        return Ok(false);
+    }
+    for (a, b) in edges(outer) {
+        if Rect::from_corners(a, b).overlaps(bounds) {
+            spend(inner.len())?;
+            if edges(inner).any(|(c, d)| segments_touch(a, b, c, d)) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// The edges of a closed ring, the one from its last point back to its first included.
+fn edges(ring: &[Point]) -> impl Iterator<Item = (Point, Point)> + '_ {
+    ring.iter().enumerate().filter_map(|(i, &a)| ring.get((i + 1) % ring.len()).map(|&b| (a, b)))
+}
+
+/// Whether `v` is between `lo` and `hi`, given in either order, or equal to one of them.
+fn between(lo: Nm, v: Nm, hi: Nm) -> bool {
+    (lo.min(hi)..=lo.max(hi)).contains(&v)
+}
+
+/// Whether the segments from `a` to `b` and from `c` to `d` share a point, their ends included.
+/// Segments too far outside the design range to compare count as touching.
+fn segments_touch(a: Point, b: Point, c: Point, d: Point) -> bool {
+    let sides = (orientation(c, d, a), orientation(c, d, b), orientation(a, b, c), orientation(a, b, d));
+    let (Some(a_side), Some(b_side), Some(c_side), Some(d_side)) = sides else { return true };
+    // They cross when the ends of each lie on opposite sides of the other.
+    if a_side.signum() * b_side.signum() < 0 && c_side.signum() * d_side.signum() < 0 {
+        return true;
+    }
+    // Or an end of one lies on the other: in line with it, and within its extent.
+    let on = |side: i128, p: Point, from: Point, to: Point| side == 0 && between(from.x, p.x, to.x) && between(from.y, p.y, to.y);
+    on(a_side, a, c, d) || on(b_side, b, c, d) || on(c_side, c, a, b) || on(d_side, d, a, b)
+}
+
 /// Whether `p` lies strictly inside the closed `ring` (a point on an edge is not inside).
-pub fn ring_contains(ring: &[Point], p: Point) -> bool {
+fn ring_contains(ring: &[Point], p: Point) -> bool {
     let mut inside = false;
     for (i, &a) in ring.iter().enumerate() {
         let Some(&b) = ring.get((i + 1) % ring.len()) else { return false };
         let Some(side) = orientation(a, b, p) else { return false };
-        let within = |lo: Nm, v: Nm, hi: Nm| (lo.min(hi)..=lo.max(hi)).contains(&v);
-        if side == 0 && within(a.x, p.x, b.x) && within(a.y, p.y, b.y) {
+        if side == 0 && between(a.x, p.x, b.x) && between(a.y, p.y, b.y) {
             return false;
         }
         // A ray from `p` to the right crosses an edge going up when `p` is on its left, and an
@@ -437,6 +494,83 @@ mod tests {
         assert!(chain(&star, Nm(10)).expect("chain").is_empty());
         let path: Vec<Piece> = (0..100_000).map(|i| line(p(i * 100, 0), p(i * 100 + 100, 0))).collect();
         assert!(chain(&path, Nm(10)).expect("chain").is_empty());
+    }
+
+    #[test]
+    fn more_pieces_than_a_contour_has_points_are_refused() {
+        // The pieces are out of range, so a call that gets past the count stops at the first one
+        // instead of chaining four million of them, which would take most of a gigabyte.
+        let pieces = vec![line(p(i64::MAX, 0), p(0, 0)); MAX_POINTS + 1];
+        assert_eq!(chain(&pieces, Nm(0)), Err(GeomError::TooManyPoints));
+        assert_eq!(chain(pieces.get(..MAX_POINTS).unwrap_or_default(), Nm(0)), Err(GeomError::OutOfRange));
+    }
+
+    fn square(x: i64, y: i64, side: i64) -> Vec<Point> {
+        vec![p(x, y), p(x + side, y), p(x + side, y + side), p(x, y + side)]
+    }
+
+    #[test]
+    fn segments_touch_where_they_cross_or_meet() {
+        let touch = |a: (i64, i64), b: (i64, i64), c: (i64, i64), d: (i64, i64)| {
+            let hit = segments_touch(p(a.0, a.1), p(b.0, b.1), p(c.0, c.1), p(d.0, d.1));
+            // The same answer whichever segment comes first and whichever way each runs.
+            assert_eq!(hit, segments_touch(p(d.0, d.1), p(c.0, c.1), p(b.0, b.1), p(a.0, a.1)));
+            hit
+        };
+        assert!(touch((0, 0), (10, 10), (0, 10), (10, 0)), "crossing");
+        assert!(touch((0, 0), (10, 0), (5, 0), (5, 9)), "an end on the other segment");
+        assert!(touch((0, 0), (10, 0), (10, 0), (20, 5)), "end to end");
+        assert!(touch((0, 0), (10, 0), (5, 0), (20, 0)), "overlapping in one line");
+        assert!(touch((0, 0), (0, 0), (0, 0), (5, 5)), "a point on a segment");
+        assert!(!touch((0, 0), (10, 0), (11, 0), (20, 0)), "in one line, apart");
+        assert!(!touch((0, 0), (10, 0), (0, 1), (10, 1)), "side by side");
+        assert!(!touch((0, 0), (10, 0), (5, 1), (5, 9)), "pointing at it, stopping short");
+        assert!(!touch((0, 0), (10, 10), (11, 11), (11, 20)), "past its end");
+        assert!(!touch((0, 0), (0, 10), (0, 11), (0, 20)), "in one upright line, apart");
+        // Each end in turn is the one that lies on the other segment.
+        assert!(segments_touch(p(5, 0), p(5, 9), p(0, 0), p(10, 0)) && segments_touch(p(5, 9), p(5, 0), p(0, 0), p(10, 0)));
+        assert!(segments_touch(p(0, 0), p(10, 0), p(5, 0), p(5, 9)) && segments_touch(p(0, 0), p(10, 0), p(5, 9), p(5, 0)));
+        assert!(touch((i64::MIN, i64::MIN), (i64::MAX, i64::MAX), (i64::MIN, i64::MAX), (i64::MAX, i64::MIN)), "too large to compare");
+    }
+
+    #[test]
+    fn a_ring_is_wholly_inside_another_or_not() {
+        let outer = square(0, 0, 100);
+        let within = |inner: &[Point], outer: &[Point]| ring_within(inner, outer, &mut usize::MAX.clone());
+        assert_eq!(within(&square(10, 10, 20), &outer), Ok(true));
+        assert_eq!(within(&square(90, 40, 20), &outer), Ok(false), "starts inside and sticks out");
+        assert_eq!(within(&square(80, 40, 20), &outer), Ok(false), "touches the edge from inside");
+        assert_eq!(within(&square(0, 0, 100), &outer), Ok(false), "the same ring");
+        assert_eq!(within(&square(200, 0, 20), &outer), Ok(false), "outside");
+        assert_eq!(within(&square(-10, -10, 120), &outer), Ok(false), "around it");
+        assert_eq!(within(&outer, &square(-10, -10, 120)), Ok(true));
+        assert_eq!(within(&[], &outer), Ok(false));
+        assert_eq!(within(&square(10, 10, 20), &[]), Ok(false));
+        // Every corner inside a notched outline, with the notch cutting through between two of them.
+        let notched = [p(0, 0), p(100, 0), p(100, 100), p(50, 20), p(0, 100)];
+        assert_eq!(within(&[p(10, 10), p(90, 10), p(90, 60), p(10, 60)], &notched), Ok(false));
+        assert_eq!(within(&[p(10, 5), p(90, 5), p(90, 15), p(10, 15)], &notched), Ok(true));
+        // The edge that closes a ring counts like any other: the outer ring's, from its last
+        // corner back to its first, and the inner ring's, which the tip of the notch touches.
+        assert_eq!(within(&[p(10, 40), p(10, 60), p(-10, 60), p(-10, 40)], &outer), Ok(false));
+        assert_eq!(within(&[p(10, 20), p(10, 5), p(90, 5), p(90, 20)], &notched), Ok(false));
+    }
+
+    #[test]
+    fn comparing_rings_stops_when_the_work_runs_out() {
+        let outer = square(0, 0, 100);
+        // Four corners of the outer ring; none of its edges comes near the inner ring.
+        let mut work = 8;
+        assert_eq!(ring_within(&square(10, 10, 20), &outer, &mut work), Ok(true));
+        assert_eq!(ring_within(&square(40, 40, 20), &outer, &mut work), Ok(true));
+        assert_eq!((work, ring_within(&square(70, 70, 20), &outer, &mut work)), (0, Err(GeomError::TooManyPoints)));
+        // Each edge of a diamond comes near a ring at its centre (their bounding boxes overlap),
+        // and each then costs the ring's four edges: 4 + 4 × 4.
+        let diamond = [p(50, 0), p(100, 50), p(50, 100), p(0, 50)];
+        let mut work = 19;
+        assert_eq!(ring_within(&square(45, 45, 10), &diamond, &mut work), Err(GeomError::TooManyPoints));
+        let mut work = 20;
+        assert_eq!((ring_within(&square(45, 45, 10), &diamond, &mut work), work), (Ok(true), 0));
     }
 
     #[test]

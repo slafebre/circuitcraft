@@ -1,18 +1,23 @@
 //! The board outline, assembled from the loose lines and arcs drawn on the outline layer.
 
 use crate::{Board, Graphic, GraphicShape, ItemId, LayerKind, MAX_ITEMS, ModelError};
-use circuitcraft_geom::{Arc, Contour, Edge, GeomError, MAX_POINTS, Piece, chain, ring_contains};
+use circuitcraft_geom::{Arc, Contour, Edge, GeomError, MAX_POINTS, Piece, chain, ring_within};
 use circuitcraft_units::{Nm, Point};
 use std::collections::BTreeSet;
 
 /// The widest gap between the ends of two drawings that [`Board::assemble_outline`] closes.
 pub const MAX_OUTLINE_GAP: Nm = Nm(1_000_000);
 
-/// How many corners of the outline [`Board::assemble_outline`] compares cutouts with, all cutouts
-/// together: each cutout is looked up against every corner of the outline, so the cost is their
-/// product. A board with a thousand holes inside an outline of ten thousand corners uses a tenth
-/// of this.
+/// How many comparisons [`Board::assemble_outline`] makes to tell that the cutouts lie inside the
+/// outline, all cutouts together ([`ring_within`] says what costs one). Each cutout is compared
+/// with every corner of the outline, and with the edges of the outline that pass near it, corner
+/// by corner. A board with a thousand holes well inside an outline of ten thousand corners uses a
+/// tenth of this; a ring-shaped board with eleven thousand corners inside and out just fits.
 const MAX_OUTLINE_WORK: usize = 100_000_000;
+
+const TOO_MUCH: &str = "corners in the outline and its cutouts to compare them";
+
+const NOT_INSIDE: &str = "a closed shape is not wholly inside the largest one; a board has one outline";
 
 /// What [`Board::assemble_outline`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,14 +34,17 @@ impl Board {
     ///
     /// Lines and arcs join end to end where the ends are within `gap` of each other (at most
     /// [`MAX_OUTLINE_GAP`]); circles and polygons are closed already. The largest closed shape
-    /// becomes the outline and every other one a cutout, which must start inside the outline (its
-    /// lowest leftmost corner is the one that is looked at): a board has one outline. The drawings
-    /// are removed, so the outline is held once.
+    /// becomes the outline and every other one a cutout, which must lie wholly inside the outline
+    /// and touch it nowhere: a board has one outline. Curves are compared as chords within
+    /// [`circuitcraft_geom::CHAIN_TOLERANCE`] of them, so a curved edge may be crossed or touched
+    /// by less than that, or by less than twice that where two curves meet. Cutouts are not
+    /// compared with each other. The drawings are removed, so the outline is held once.
     ///
     /// Fails, changing nothing, when the layer has no drawings, when a drawing is part of no
-    /// closed shape, when a closed shape lies outside the largest, or when the drawings are more
-    /// than can be worked through in a moment (their points, or the corners of the outline times
-    /// the number of cutouts). A drawing left open is
+    /// closed shape, when a closed shape is not inside the largest, or when the drawings are more
+    /// than can be worked through in a moment: their points, or the corners of the outline times
+    /// the number of cutouts, plus the corners of each cutout times the edges of the outline that
+    /// pass near it. A drawing left open is
     /// refused, not skipped: without the line that was meant to close the board's edge, the
     /// largest closed shape would be a mounting hole.
     pub fn assemble_outline(&mut self, gap: Nm) -> Result<Assembled, ModelError> {
@@ -62,13 +70,13 @@ impl Board {
             ));
         }
         let outer = loops.iter().max_by_key(|l| l.area2).ok_or(ModelError::BadOutline("there are no drawings on the outline layer"))?;
-        let inside = |l: &&circuitcraft_geom::Loop| l.ring.first().is_some_and(|&p| ring_contains(&outer.ring, p));
         let others = loops.iter().filter(|l| !std::ptr::eq(*l, outer));
-        if outer.ring.len().saturating_mul(loops.len()) > MAX_OUTLINE_WORK {
-            return Err(ModelError::TooMany("cutouts for an outline with this many corners"));
-        }
-        if !others.clone().all(|l| inside(&l)) {
-            return Err(ModelError::BadOutline("a closed shape lies outside the largest one; a board has one outline"));
+        let mut work = MAX_OUTLINE_WORK;
+        for other in others.clone() {
+            let inside = ring_within(&other.ring, &outer.ring, &mut work);
+            if !inside.map_err(|_| ModelError::TooMany(TOO_MUCH))? {
+                return Err(ModelError::BadOutline(NOT_INSIDE));
+            }
         }
         let cutouts: Vec<Contour> = others.map(|l| l.contour.clone()).collect();
         if cutouts.len() > MAX_ITEMS {
@@ -223,8 +231,31 @@ mod tests {
         let other = Contour::polyline(&[p(60 * MM, 0), p(70 * MM, 0), p(70 * MM, 10 * MM), p(60 * MM, 10 * MM)]).expect("rectangle");
         draw(&mut b, OUTLINE, GraphicShape::Polygon { outline: other, filled: false });
         let before = b.clone();
-        assert_eq!(b.assemble_outline(Nm(0)), Err(ModelError::BadOutline("a closed shape lies outside the largest one; a board has one outline")));
+        assert_eq!(b.assemble_outline(Nm(0)), Err(ModelError::BadOutline(NOT_INSIDE)));
         assert_eq!(b, before);
+        // A cutout that starts inside and crosses the edge, and one that touches the edge from
+        // inside: neither is wholly inside.
+        let rectangle = |x: i64, y: i64, w: i64, h: i64| {
+            let outline = Contour::polyline(&[p(x, y), p(x + w, y), p(x + w, y + h), p(x, y + h)]).expect("rectangle");
+            GraphicShape::Polygon { outline, filled: false }
+        };
+        for shape in [rectangle(45 * MM, 10 * MM, 10 * MM, 10 * MM), rectangle(40 * MM, 10 * MM, 10 * MM, 10 * MM)] {
+            let mut b = board_with_rectangle();
+            draw(&mut b, OUTLINE, shape);
+            let before = b.clone();
+            assert_eq!(b.assemble_outline(Nm(0)), Err(ModelError::BadOutline(NOT_INSIDE)));
+            assert_eq!(b, before, "a refused cutout changes nothing");
+        }
+        // The same circle drawn twice: neither is inside the other.
+        let mut twice = Board::new("x");
+        for _ in 0..2 {
+            draw(&mut twice, OUTLINE, GraphicShape::Circle { center: p(0, 0), radius: Nm(5 * MM) });
+        }
+        assert_eq!(twice.assemble_outline(Nm(0)), Err(ModelError::BadOutline(NOT_INSIDE)));
+        // One nanometre clear of the edge, it is a cutout.
+        let mut b = board_with_rectangle();
+        draw(&mut b, OUTLINE, rectangle(40 * MM, 10 * MM, 10 * MM - 1, 10 * MM));
+        assert_eq!(b.assemble_outline(Nm(0)), Ok(Assembled { used: 5, cutouts: 1 }));
         // Nothing on the outline layer at all, and a gap that is no gap.
         let mut empty = Board::new("x");
         draw(&mut empty, TOP_SILK, GraphicShape::Circle { center: p(0, 0), radius: Nm(MM) });
@@ -257,7 +288,8 @@ mod tests {
 
     #[test]
     fn an_outline_with_too_many_corners_and_cutouts_is_refused_before_it_takes_long() {
-        // 10,000 corners on a circle of 1 m, and 10,000 triangles inside it.
+        // 10,000 corners on a circle of 1 m, and 10,001 triangles inside it, far from its edge:
+        // each costs the 10,000 corners, which together is one cutout more than the work allows.
         let corner = |i: u32| {
             let a = f64::from(i) * std::f64::consts::TAU / 10_000.0;
             p((1e9 * a.cos()).round() as i64, (1e9 * a.sin()).round() as i64)
@@ -266,16 +298,16 @@ mod tests {
         let outline = Contour::polyline(&(0..10_000).map(corner).collect::<Vec<_>>()).expect("outline");
         draw(&mut b, OUTLINE, GraphicShape::Polygon { outline, filled: false });
         let mut last = None;
-        for i in 0..10_000_i64 {
+        for i in 0..10_001_i64 {
             let (x, y) = ((i % 100 - 50) * MM, (i / 100 - 50) * MM);
             let triangle = Contour::polyline(&[p(x, y), p(x + MM / 2, y), p(x, y + MM / 2)]).expect("triangle");
             last = Some(draw(&mut b, OUTLINE, GraphicShape::Polygon { outline: triangle, filled: false }));
         }
-        assert_eq!(b.assemble_outline(Nm(0)), Err(ModelError::TooMany("cutouts for an outline with this many corners")));
-        assert!(b.outline.is_none() && b.graphics.len() == 10_001);
+        assert_eq!(b.assemble_outline(Nm(0)), Err(ModelError::TooMany(TOO_MUCH)));
+        assert!(b.outline.is_none() && b.graphics.len() == 10_002);
         // With one cutout fewer it is within the budget.
         b.graphics.remove(last.expect("a triangle"));
-        assert_eq!(b.assemble_outline(Nm(0)), Ok(Assembled { used: 10_000, cutouts: 9_999 }));
+        assert_eq!(b.assemble_outline(Nm(0)), Ok(Assembled { used: 10_001, cutouts: 10_000 }));
     }
 
     #[test]
