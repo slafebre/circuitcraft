@@ -71,7 +71,7 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 - **EAGLE**: the reader is written by hand from `eagle.dtd` and real files. Never commit the DTD
   (CC BY-ND 3.0) or code generated from it.
 - **Test designs** are never committed. The corpus manifest pins upstream designs by commit and
-  checksum, and `cargo xtask corpus` fetches them for tests.
+  checksum; a planned `cargo xtask corpus` command (not written yet) will fetch them for tests.
 
 ## Architecture rules
 
