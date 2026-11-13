@@ -3,6 +3,7 @@
 //! - [`Rect`]: bounding boxes.
 //! - [`Arc`]: circular arcs through three points, and their approximation by segments.
 //! - [`Contour`]: closed outlines of straight and arc edges; [`Polygon`]: filled areas with holes.
+//! - [`chain`]: closed outlines assembled from loose lines and arcs.
 //! - [`boolean`], [`offset`], [`stroke`]: polygon booleans, clearance offsets and track shapes,
 //!   on `i_overlay`'s 64-bit integer engine, deterministic on every platform.
 //!
@@ -10,10 +11,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod arc;
+mod chain;
 mod contour;
 mod region;
 
 pub use arc::{Arc, Circle};
+pub use chain::{CHAIN_TOLERANCE, Loop, Piece, chain, ring_contains};
 pub use circuitcraft_units::{Nm, Point, UnitError};
 pub use contour::{Contour, Edge, Polygon, area2};
 pub use region::{BoolOp, FillRule, boolean, offset, simplify, stroke};
@@ -54,6 +57,7 @@ pub(crate) fn check_point(p: Point) -> Result<(), GeomError> {
 
 /// An axis-aligned rectangle, `min` at the lower left, `max` at the upper right (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rect {
     /// Lower-left corner.
     pub min: Point,

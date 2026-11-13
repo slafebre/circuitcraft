@@ -86,6 +86,7 @@ impl Nm {
 
 /// A point on the board, in nanometres. `y` grows upwards, as on a fabrication drawing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Point {
     /// Horizontal position.
     pub x: Nm,

@@ -1,13 +1,16 @@
 //! CircuitCraft's own files: a project folder with a `.ccproj` project file and a `.ccpcb` board.
 //!
-//! Both are pretty-printed JSON that starts with `format` and `version`, so a person, a script or
+//! Both are JSON that starts with `format` and `version`, so a person, a script or
 //! [`crate::detect`] can tell what a file is from its first line. Keys and items come out in a
-//! fixed order (items sorted by id), so saving the same design twice gives byte-identical files and
-//! a change to the design gives a small diff.
+//! fixed order (items sorted by id) and every item is on a line of its own (a net, a track, a pad,
+//! a corner of a zone), so saving the same design twice gives byte-identical files, a change to
+//! one item changes one line, and two branches that change different items merge.
 //!
 //! Reading treats the file as hostile: its size is capped before parsing, the parser's nesting
 //! limit and the model's collection limits bound memory, an unknown format or a newer version is
-//! refused with a clear message, and the board must pass [`Board::validate`].
+//! refused with a clear message, and the board must pass [`Board::validate`]. A file must say
+//! everything and nothing else: a field that is missing or that this build doesn't know is
+//! refused, never guessed at or dropped on the next save.
 
 use circuitcraft_model::{Board, ModelError};
 use serde::{Deserialize, Serialize};
@@ -83,6 +86,7 @@ struct BoardOut<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BoardIn {
     format: String,
     version: u64,
@@ -107,6 +111,7 @@ struct ProjectOut<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectIn {
     format: String,
     version: u64,
@@ -114,18 +119,143 @@ struct ProjectIn {
     board: String,
 }
 
-/// Just the header, read when a full parse fails, to say why in the user's terms.
+/// Just the header, read when a full parse fails, to say why in the user's terms. It skips
+/// everything else, so it also reads a file from a newer build.
 #[derive(Deserialize)]
 struct Header {
     format: Option<String>,
     version: Option<u64>,
 }
 
-/// The pretty-printed JSON, with a final newline.
+/// The JSON of a file, laid out by [`Layout`], with a final newline.
 fn pretty<T: Serialize>(v: &T) -> Result<String, NativeError> {
-    let mut text = serde_json::to_string_pretty(v).map_err(|e| NativeError::Malformed(e.to_string()))?;
-    text.push('\n');
-    Ok(text)
+    let compact = serde_json::to_string(v).map_err(|e| NativeError::Malformed(e.to_string()))?;
+    let mut layout = Layout { text: &compact, at: 0, out: String::with_capacity(compact.len().saturating_add(compact.len() / 4)) };
+    layout.value(0)?;
+    if layout.at != compact.len() {
+        return Err(layout.broken());
+    }
+    layout.out.push('\n');
+    Ok(layout.out)
+}
+
+/// How deep the lists and objects of a file may nest. The model nests about a dozen deep.
+const MAX_NESTING: usize = 64;
+
+/// Lays compact JSON out so that every item of the design is one line of the file.
+///
+/// A list or an object is written on one line when it holds no list of lists or objects: a net, a
+/// track, a pad, a point. Anything larger is opened up, one member to a line, and its members are
+/// laid out the same way: a footprint's fields each get a line, and so does each of its pads. The
+/// file itself, the board in it and each of the board's own fields are always opened up, so each
+/// design setting is a line too.
+///
+/// The text comes from `serde_json`, so it is well formed; anything else is an error, not a panic.
+struct Layout<'a> {
+    text: &'a str,
+    /// The byte the next value starts at.
+    at: usize,
+    out: String,
+}
+
+impl Layout<'_> {
+    fn broken(&self) -> NativeError {
+        NativeError::Malformed(format!("could not lay out the file at byte {}", self.at))
+    }
+
+    fn byte(&self, at: usize) -> Option<u8> {
+        self.text.as_bytes().get(at).copied()
+    }
+
+    /// Copies the text up to `end` and moves there.
+    fn copy_to(&mut self, end: usize) -> Result<(), NativeError> {
+        let part = self.text.get(self.at..end).ok_or_else(|| self.broken())?;
+        self.out.push_str(part);
+        self.at = end;
+        Ok(())
+    }
+
+    fn new_line(&mut self, depth: usize) {
+        self.out.push('\n');
+        self.out.extend(std::iter::repeat_n("  ", depth));
+    }
+
+    /// The byte after the string that starts at `at`.
+    fn string_end(&self, at: usize) -> Option<usize> {
+        let mut i = at.checked_add(1)?;
+        loop {
+            match self.byte(i)? {
+                b'"' => return i.checked_add(1),
+                b'\\' => i = i.checked_add(2)?,
+                _ => i = i.checked_add(1)?,
+            }
+        }
+    }
+
+    /// For the list or object that starts at `at`: the byte after its end, and whether it holds a
+    /// list whose elements are lists or objects.
+    fn span(&self, at: usize) -> Option<(usize, bool)> {
+        // Whether each list or object that is open is a list.
+        let mut open: Vec<bool> = Vec::new();
+        let mut nested = false;
+        let mut i = at;
+        loop {
+            match self.byte(i)? {
+                b'"' => {
+                    i = self.string_end(i)?;
+                    continue;
+                }
+                b @ (b'[' | b'{') => {
+                    nested |= open.last() == Some(&true);
+                    if open.len() >= MAX_NESTING {
+                        return None;
+                    }
+                    open.push(b == b'[');
+                }
+                b']' | b'}' => {
+                    open.pop()?;
+                    if open.is_empty() {
+                        return i.checked_add(1).map(|end| (end, nested));
+                    }
+                }
+                _ => {}
+            }
+            i = i.checked_add(1)?;
+        }
+    }
+
+    /// Writes the value that starts at `self.at`, `depth` levels inside the file.
+    fn value(&mut self, depth: usize) -> Result<(), NativeError> {
+        let Some(first @ (b'[' | b'{')) = self.byte(self.at) else {
+            // A string, a number, true, false or null: up to the next comma or closing bracket.
+            let mut end = self.at;
+            while let Some(b) = self.byte(end).filter(|b| !matches!(b, b',' | b']' | b'}')) {
+                end = if b == b'"' { self.string_end(end).ok_or_else(|| self.broken())? } else { end + 1 };
+            }
+            return if end > self.at { self.copy_to(end) } else { Err(self.broken()) };
+        };
+        let (end, nested) = self.span(self.at).ok_or_else(|| self.broken())?;
+        if end == self.at + 2 || (depth > 2 && !nested) {
+            return self.copy_to(end);
+        }
+        self.copy_to(self.at + 1)?;
+        loop {
+            self.new_line(depth + 1);
+            if first == b'{' {
+                let colon = self.string_end(self.at).filter(|&colon| self.byte(colon) == Some(b':')).ok_or_else(|| self.broken())?;
+                self.copy_to(colon + 1)?;
+                self.out.push(' ');
+            }
+            self.value(depth + 1)?;
+            match self.byte(self.at) {
+                Some(b',') => self.copy_to(self.at + 1)?,
+                Some(b']' | b'}') => break,
+                _ => return Err(self.broken()),
+            }
+        }
+        self.new_line(depth);
+        self.copy_to(self.at + 1)
+    }
 }
 
 /// A board as `.ccpcb` text.
@@ -407,12 +537,21 @@ fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use circuitcraft_geom::{Contour, Polygon, Rect};
     use circuitcraft_model::layer_ids::{TOP_COPPER, TOP_FABRICATION, TOP_SILK};
     use circuitcraft_model::{
-        Assembly, Footprint, FootprintText, Hole, Justify, LayerId, LibraryLink, Mounting, Opening, Pad, PadShape, Rotation, Side, Slot, TextContent,
-        TrackPath,
+        Assembly, DesignSettings, Footprint, FootprintText, Hole, ItemId, Justify, Keepout, LayerId, LibraryLink, Mounting, Opening, Pad,
+        PadConnection, PadShape, Rotation, Side, Slot, TextContent, TrackPath, Zone, ZoneFill,
     };
     use circuitcraft_units::{Nm, Point};
+
+    fn at(x: i64, y: i64) -> Point {
+        Point::new(Nm(x), Nm(y))
+    }
+
+    fn square(x: i64, y: i64, side: i64) -> Contour {
+        Contour::rect(Rect::from_corners(at(x, y), at(x + side, y + side)))
+    }
 
     fn blinky() -> Board {
         let mut b = Board::new("Blinky");
@@ -466,6 +605,38 @@ mod tests {
             texts,
         };
         b.footprints.insert(connector).expect("footprint");
+        // An outline with a round cutout, a hole outside any footprint, settings of its own, a
+        // hatched ground zone with a hole that has been poured, and a via keepout.
+        b.outline = Some(square(0, 0, 30_000_000));
+        b.cutouts = vec![Contour::circle(at(15_000_000, 15_000_000), Nm(2_000_000)).expect("circle")];
+        b.add_hole(at(3_000_000, 3_000_000), Hole::round(Nm(3_200_000), false)).expect("hole");
+        b.design = DesignSettings { tent_vias: false, origin: at(0, 30_000_000), ..DesignSettings::default() };
+        let ring = |x: i64, side: i64| vec![at(x, x), at(x + side, x), at(x + side, x + side), at(x, x + side)];
+        let zone = Zone {
+            id: b.fresh_id().expect("id"),
+            layer: TOP_COPPER,
+            net: Some(gnd),
+            outline: square(0, 0, 30_000_000),
+            holes: vec![square(20_000_000, 20_000_000, 5_000_000)],
+            clearance: Nm(200_000),
+            min_width: Nm(150_000),
+            priority: 1,
+            fill: ZoneFill::Hatched { width: Nm(200_000), gap: Nm(600_000) },
+            pads: PadConnection::Relief { gap: Nm(250_000), spoke: Nm(300_000) },
+            keep_islands: false,
+            filled: vec![Polygon { outer: ring(200_000, 29_600_000), holes: vec![ring(19_800_000, 5_400_000)] }],
+        };
+        b.zones.insert(zone).expect("zone");
+        let keepout = Keepout {
+            id: b.fresh_id().expect("id"),
+            layer: TOP_COPPER,
+            outline: square(25_000_000, 0, 5_000_000),
+            tracks: false,
+            vias: true,
+            zones: false,
+        };
+        b.keepouts.insert(keepout).expect("keepout");
+        assert_eq!(b.validate(), Ok(()));
         b
     }
 
@@ -534,11 +705,10 @@ mod tests {
     }
 
     #[test]
-    fn a_footprint_must_say_what_it_shows_and_how_it_is_assembled() {
+    fn a_file_says_everything_under_its_own_name_and_nothing_else() {
         let good = write_board(&blinky()).expect("write");
-        // A footprint from before it had texts and assembly attributes, a field under another name
-        // and a word this build doesn't know: refused, not filled in with a guess. (A footprint
-        // without `link` still reads, as one drawn on the board.)
+        // A field under another name or a word this build doesn't know: refused, not filled in
+        // with a guess.
         for (from, to) in [
             ("\"texts\"", "\"labels\""),
             ("\"assembly\"", "\"assembly_v0\""),
@@ -547,15 +717,143 @@ mod tests {
             ("\"fitted\"", "\"populated\""),
             ("\"visible\"", "\"shown\""),
             ("\"mirrored\"", "\"mirror\""),
-            ("\"content\": \"reference\"", "\"content\": \"designator\""),
-            ("\"content\": \"value\"", "\"content\": \"val\""),
-            ("\"fixed\": \"A1\"", "\"words\": \"A1\""),
-            ("\"mounting\": \"surface_mount\"", "\"mounting\": \"glued\""),
-            ("\"library\": \"Connectors\"", "\"lib\": \"Connectors\""),
-            ("\"footprint\": \"USB-C-16P\"", "\"name\": \"USB-C-16P\""),
+            ("\"content\":\"reference\"", "\"content\":\"designator\""),
+            ("\"content\":\"value\"", "\"content\":\"val\""),
+            ("\"fixed\":\"A1\"", "\"words\":\"A1\""),
+            ("\"mounting\":\"surface_mount\"", "\"mounting\":\"glued\""),
+            ("\"library\":\"Connectors\"", "\"lib\":\"Connectors\""),
+            ("\"footprint\":\"USB-C-16P\"", "\"name\":\"USB-C-16P\""),
+            ("\"design\"", "\"settings\""),
+            ("\"tent_vias\"", "\"tented\""),
+            ("\"keepouts\"", "\"rule_areas\""),
+            ("\"holes\": [\n      {", "\"drills\": [\n      {"),
+            ("\"min_width\"", "\"minimum\""),
+            ("\"fill\": {\"hatched\"", "\"fill\": {\"crosshatched\""),
+            ("\"pads\": {\"relief\"", "\"pads\": {\"thermal\""),
+            ("\"vias\": true", "\"via\": true"),
+            ("{\"line\":{\"from\"", "{\"segment\":{\"from\""),
+            ("\"mask\":\"rules\"", "\"mask\":\"default\""),
         ] {
             assert!(good.contains(from), "{from}");
             assert!(matches!(read_board(&good.replacen(from, to, 1)), Err(NativeError::Malformed(_))), "{from} -> {to}");
+        }
+        // A field left out is not read as empty, and one more than this build knows is not skipped:
+        // saving would drop it.
+        for (field, text) in [
+            ("link", "        \"link\": {\"library\":\"Connectors\",\"footprint\":\"USB-C-16P\"},\n"),
+            (
+                "outline",
+                "    \"outline\": {\n      \"start\": {\"x\":0,\"y\":0},\n      \"edges\": [\n        {\"line\":{\"to\":{\"x\":30000000,\"y\":0}}},\n        {\"line\":{\"to\":{\"x\":30000000,\"y\":30000000}}},\n        {\"line\":{\"to\":{\"x\":0,\"y\":30000000}}}\n      ]\n    },\n",
+            ),
+            ("keep_islands", "        \"keep_islands\": false,\n"),
+            ("net", ",\"net\":null"),
+            ("slot", "\"slot\":null,"),
+            ("by", "\"by\":null"),
+        ] {
+            assert!(good.contains(text), "{field}: {text}");
+            let err = read_board(&good.replacen(text, "", 1)).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains(&format!("missing field `{field}`")), "without {field}: {err}");
+        }
+        for (after, extra) in [
+            ("\"version\": 1,", "\"comment\": 1,"),
+            ("\"board\": {", "\"comment\": 1,"),
+            ("\"design\": {", "\"comment\": 1,"),
+            ("\"origin\": {", "\"z\":0,"),
+            ("{\"number\":\"A1\",", "\"comment\":1,"),
+            ("\"hole\":{", "\"depth\":1,"),
+            ("{\"line\":{", "\"width\":1,"),
+        ] {
+            assert!(good.contains(after), "{after}");
+            let err = read_board(&good.replacen(after, &format!("{after}{extra}"), 1)).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("unknown field"), "{extra} after {after}: {err}");
+        }
+        let project = write_project(&Project { name: "P".to_owned(), board: "P.ccpcb".to_owned() }).expect("write");
+        assert!(matches!(read_project(&project.replacen("\"name\"", "\"comment\": 1,\n  \"name\"", 1)), Err(NativeError::Malformed(_))));
+    }
+
+    #[test]
+    fn every_item_is_on_a_line_of_its_own() {
+        let mut b = Board::new("B");
+        let id = |n: u128| ItemId::from_u128(n).to_string();
+        b.nets.insert(circuitcraft_model::Net { id: circuitcraft_model::NetId::from_u128(1), name: "GND".to_owned() }).expect("net");
+        for n in [2, 3] {
+            let path = TrackPath::Line { from: at(0, 0), to: at(n as i64 * 1_000_000, 0) };
+            b.tracks
+                .insert(circuitcraft_model::Track { id: ItemId::from_u128(n), layer: TOP_COPPER, width: Nm(250_000), path, net: None })
+                .expect("track");
+        }
+        b.outline = Contour::polyline(&[at(0, 0), at(1_000_000, 0), at(0, 1_000_000)]);
+        let text = write_board(&b).expect("write");
+        // The header, the board's own fields and each design setting are lines; a net, a track, a
+        // layer and a corner of the outline are one line each; an empty list stays closed.
+        let expected = [
+            "{".to_owned(),
+            "  \"format\": \"circuitcraft.board\",".to_owned(),
+            "    \"name\": \"B\",".to_owned(),
+            "    \"design\": {".to_owned(),
+            "      \"tent_vias\": true,".to_owned(),
+            "      \"origin\": {\"x\":0,\"y\":0}".to_owned(),
+            "        {\"id\":4,\"name\":\"Top Copper\",\"kind\":\"copper\",\"thickness\":35000,\"side\":null,\"pair\":null},".to_owned(),
+            "    \"outline\": {".to_owned(),
+            "      \"start\": {\"x\":0,\"y\":0},".to_owned(),
+            "        {\"line\":{\"to\":{\"x\":1000000,\"y\":0}}},".to_owned(),
+            "        {\"line\":{\"to\":{\"x\":0,\"y\":1000000}}}".to_owned(),
+            "    \"cutouts\": [],".to_owned(),
+            "    \"nets\": [".to_owned(),
+            format!("      {{\"id\":\"{}\",\"name\":\"GND\"}}", id(1)),
+            "    ],".to_owned(),
+            format!(
+                "      {{\"id\":\"{}\",\"layer\":4,\"width\":250000,\"path\":{{\"line\":{{\"from\":{{\"x\":0,\"y\":0}},\"to\":{{\"x\":2000000,\"y\":0}}}}}},\"net\":null}},",
+                id(2)
+            ),
+            "    \"graphics\": []".to_owned(),
+            "  }".to_owned(),
+            "}".to_owned(),
+        ];
+        let mut lines = text.lines();
+        for line in &expected {
+            assert!(lines.any(|l| l == line), "no line {line:?}, in this order, in:\n{text}");
+        }
+        assert_eq!(read_board(&text).ok().as_ref(), Some(&b));
+        // Changing one track changes its line and no other.
+        if let Some(t) = b.tracks.get_mut(ItemId::from_u128(3)) {
+            t.width = Nm(300_000);
+        }
+        let changed = write_board(&b).expect("write");
+        let differing: Vec<_> = text.lines().zip(changed.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!((text.lines().count(), differing.len()), (changed.lines().count(), 1), "{differing:?}");
+        assert!(differing.iter().all(|(old, new)| old.contains(&id(3)) && new.contains("\"width\":300000")));
+    }
+
+    #[test]
+    fn a_footprint_and_a_zone_open_up_to_one_pad_and_one_corner_per_line() {
+        let text = write_board(&blinky()).expect("write");
+        let count = |start: &str| text.lines().filter(|l| l.trim_start().starts_with(start)).count();
+        assert_eq!(count("{\"number\":"), 3, "one line per pad");
+        assert_eq!(count("\"reference\": \"J1\""), 1, "a footprint's own fields are lines");
+        assert_eq!(count("\"assembly\": {\"mounting\":\"surface_mount\""), 1, "small objects stay on their line");
+        // The poured copper: an area of four corners with a hole of four, each corner a line.
+        let poured = text.split_once("\"filled\": [").map(|(_, rest)| rest).and_then(|rest| rest.split_once("\n    ]")).map(|(fill, _)| fill);
+        assert_eq!(poured.map(|fill| fill.lines().filter(|l| l.trim_start().starts_with("{\"x\":")).count()), Some(8));
+        // Text with brackets, quotes and commas in it is copied as it is.
+        let mut b = blinky();
+        b.name = "A \"board\", [really] {it is}\\".to_owned();
+        let text = write_board(&b).expect("write");
+        assert!(text.contains("    \"name\": \"A \\\"board\\\", [really] {it is}\\\\\",\n"), "{text}");
+        assert_eq!(read_board(&text).ok(), Some(b));
+    }
+
+    #[test]
+    fn laying_out_broken_text_is_an_error_not_a_crash() {
+        let lay = |text: &str| {
+            let mut layout = Layout { text, at: 0, out: String::new() };
+            layout.value(0).map(|()| layout.out)
+        };
+        assert_eq!(lay("{\"a\":[1,2],\"b\":{}}").ok().as_deref(), Some("{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {}\n}"));
+        assert_eq!(lay("7").ok().as_deref(), Some("7"));
+        let deep = "[".repeat(MAX_NESTING + 1) + &"]".repeat(MAX_NESTING + 1);
+        for text in ["", "{", "[1,", "{\"a\"}", "{\"a\":}", "{\"a", "[\"a\\", "{1:2}", "]", deep.as_str(), &"[".repeat(100_000)] {
+            assert!(matches!(lay(text), Err(NativeError::Malformed(_))), "{:?}", text.get(..text.len().min(40)));
         }
     }
 

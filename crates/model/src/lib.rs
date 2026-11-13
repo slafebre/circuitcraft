@@ -1,7 +1,7 @@
 //! The design database.
 //!
-//! A [`Board`] holds its layer stack, outline, nets and items (footprints with pads, tracks, vias,
-//! zones, text and drawings). Items live in copy-on-write [`Items`] collections that record what
+//! A [`Board`] holds its design settings, layer stack, outline, nets and items (footprints with
+//! pads, tracks, vias, zones, keepouts, holes, text and drawings). Items live in copy-on-write [`Items`] collections that record what
 //! an edit touches, so a [`Document`] keeps each edit's [`ChangeSet`] for undo and redo, at a cost
 //! that follows the size of the edit, not the size of the board.
 //!
@@ -14,18 +14,21 @@ mod change;
 mod document;
 mod items;
 mod layer;
+mod outline;
 mod store;
 
 pub use change::{BoardEdit, ChangeSet};
 pub use document::{Document, UNDO_LIMIT};
 pub use items::{
-    Assembly, Footprint, FootprintText, Graphic, GraphicShape, Hole, ItemId, Justify, LibraryLink, MAX_FOOTPRINT_GRAPHICS, MAX_FOOTPRINT_TEXTS,
-    MAX_PADS, Mounting, Net, NetId, Opening, Pad, PadFace, PadShape, Rotation, Side, Slot, Text, TextContent, Track, TrackPath, Via, Zone,
+    Assembly, BoardHole, DesignSettings, Footprint, FootprintText, Graphic, GraphicShape, Hole, ItemId, Justify, Keepout, LibraryLink,
+    MAX_FOOTPRINT_GRAPHICS, MAX_FOOTPRINT_TEXTS, MAX_PADS, MAX_ZONE_HOLES, MAX_ZONE_POLYGONS, Mounting, Net, NetId, Opening, Pad, PadConnection,
+    PadFace, PadShape, Rotation, Side, Slot, Text, TextContent, Track, TrackPath, Via, Zone, ZoneFill,
 };
 pub use layer::{Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, ids as layer_ids};
+pub use outline::{Assembled, MAX_OUTLINE_GAP};
 pub use store::{Change, Items, Keyed, MAX_ITEMS};
 
-use circuitcraft_geom::{Contour, Edge, MAX_POINTS};
+use circuitcraft_geom::{Contour, Edge, MAX_POINTS, Polygon};
 use circuitcraft_units::{MAX_ABS, Nm, Point};
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +69,12 @@ pub enum ModelError {
     /// A pad's copper, hole and net don't fit together.
     #[error("pad {0:?}: {1}")]
     BadPad(String, &'static str),
+    /// An outline, a zone or a keepout that can't do what it is for.
+    #[error("{0}: {1}")]
+    BadArea(&'static str, &'static str),
+    /// The drawings on the outline layer don't make one board outline.
+    #[error("board outline: {0}")]
+    BadOutline(&'static str),
     /// A collection is at its size limit ([`MAX_ITEMS`], [`MAX_PADS`], [`MAX_LAYERS`], ...).
     #[error("too many {0}")]
     TooMany(&'static str),
@@ -73,12 +82,17 @@ pub enum ModelError {
 
 /// A printed circuit board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Board {
     /// The board's name, shown in title bars and outputs.
     pub name: String,
+    /// The values the whole board shares.
+    pub design: DesignSettings,
     /// Its layers.
     pub stack: LayerStack,
-    /// The board outline, if drawn.
+    /// The board outline, if it has one. Loose lines and arcs on the outline layer become one
+    /// with [`BoardEdit::assemble_outline`].
+    #[serde(deserialize_with = "items::required")]
     pub outline: Option<Contour>,
     /// Holes and slots cut through the board inside the outline (at most [`MAX_ITEMS`]).
     #[serde(deserialize_with = "cutouts")]
@@ -93,6 +107,10 @@ pub struct Board {
     pub vias: Items<Via>,
     /// Copper zones.
     pub zones: Items<Zone>,
+    /// Areas on a copper layer that tracks, vias or zones stay out of.
+    pub keepouts: Items<Keepout>,
+    /// Holes that belong to no footprint.
+    pub holes: Items<BoardHole>,
     /// Free text.
     pub texts: Items<Text>,
     /// Free drawings (outline sketches, silkscreen logos, documentation).
@@ -114,6 +132,7 @@ impl Board {
     pub fn new(name: &str) -> Board {
         Board {
             name: name.to_owned(),
+            design: DesignSettings::default(),
             stack: LayerStack::two_layer(),
             outline: None,
             cutouts: Vec::new(),
@@ -122,6 +141,8 @@ impl Board {
             tracks: Items::default(),
             vias: Items::default(),
             zones: Items::default(),
+            keepouts: Items::default(),
+            holes: Items::default(),
             texts: Items::default(),
             graphics: Items::default(),
         }
@@ -146,6 +167,8 @@ impl Board {
             || self.vias.contains(id)
             || self.footprints.contains(id)
             || self.zones.contains(id)
+            || self.keepouts.contains(id)
+            || self.holes.contains(id)
             || self.texts.contains(id)
             || self.graphics.contains(id)
     }
@@ -191,14 +214,25 @@ impl Board {
         Ok(id)
     }
 
-    /// Removes any item (track, via, footprint, zone, text, drawing) or net by id. Removing a net
-    /// disconnects everything on it.
+    /// Adds a hole that belongs to no footprint; its id is assigned here.
+    pub fn add_hole(&mut self, position: Point, hole: Hole) -> Result<ItemId, ModelError> {
+        room(&self.holes, "holes")?;
+        let hole = BoardHole { id: self.fresh_id()?, position, hole };
+        check_board_hole(&hole)?;
+        self.holes.insert(hole)?;
+        Ok(hole.id)
+    }
+
+    /// Removes any item (track, via, footprint, zone, keepout, hole, text, drawing) or net by id.
+    /// Removing a net disconnects everything on it.
     pub fn remove(&mut self, id: ItemId) -> Result<(), ModelError> {
         let item = id;
         let removed = self.tracks.remove(item).is_some()
             || self.vias.remove(item).is_some()
             || self.footprints.remove(item).is_some()
             || self.zones.remove(item).is_some()
+            || self.keepouts.remove(item).is_some()
+            || self.holes.remove(item).is_some()
             || self.texts.remove(item).is_some()
             || self.graphics.remove(item).is_some();
         if removed {
@@ -243,14 +277,15 @@ impl Board {
         }
     }
 
-    /// Checks the whole board: the layer stack, names, ids, layer and net references, sizes,
-    /// coordinates and collection limits. Run it on any board that didn't come from these edit
+    /// Checks the whole board: the design settings, the layer stack, names, ids, layer and net
+    /// references, sizes, coordinates and collection limits. Run it on any board that didn't come from these edit
     /// methods, such as one read from a file.
     pub fn validate(&self) -> Result<(), ModelError> {
         check_name(&self.name, "board name")?;
         // Layer lookups return the first match, so the stack must be unambiguous before any item's
         // layer is checked against it.
         self.stack.validate()?;
+        check_design(&self.design)?;
         self.check_collections()?;
         let mut ids = std::collections::BTreeSet::new();
         // Nets and items share one id space, so `remove` and references are never ambiguous.
@@ -282,10 +317,19 @@ impl Board {
         }
         for z in self.zones.iter() {
             claim(z.id.as_u128())?;
-            self.check_copper_layer(z.layer, "zone")?;
-            self.check_net(z.net, "zone")?;
-            check_contour(&z.outline, "zone outline")?;
-            check_size(z.clearance, "zone clearance", true)?;
+            self.check_zone(z)?;
+        }
+        for k in self.keepouts.iter() {
+            claim(k.id.as_u128())?;
+            self.check_copper_layer(k.layer, "keepout")?;
+            check_contour(&k.outline, "keepout outline")?;
+            if !(k.tracks || k.vias || k.zones) {
+                return Err(ModelError::BadArea("keepout", "it must keep tracks, vias or zones out"));
+            }
+        }
+        for h in self.holes.iter() {
+            claim(h.id.as_u128())?;
+            check_board_hole(h)?;
         }
         for t in self.texts.iter() {
             claim(t.id.as_u128())?;
@@ -341,6 +385,8 @@ impl Board {
             (self.tracks.len(), "tracks"),
             (self.vias.len(), "vias"),
             (self.zones.len(), "zones"),
+            (self.keepouts.len(), "keepouts"),
+            (self.holes.len(), "holes"),
             (self.texts.len(), "texts"),
             (self.graphics.len(), "drawings"),
             (self.cutouts.len(), "cutouts"),
@@ -353,6 +399,8 @@ impl Board {
             .or_else(|| self.tracks.mismatched_key().map(|k| k.to_string()))
             .or_else(|| self.vias.mismatched_key().map(|k| k.to_string()))
             .or_else(|| self.zones.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.keepouts.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.holes.mismatched_key().map(|k| k.to_string()))
             .or_else(|| self.texts.mismatched_key().map(|k| k.to_string()))
             .or_else(|| self.graphics.mismatched_key().map(|k| k.to_string()));
         match misfiled {
@@ -402,6 +450,27 @@ impl Board {
         }
         check_opening(v.top_mask, "via mask expansion")?;
         check_opening(v.bottom_mask, "via mask expansion")
+    }
+
+    fn check_zone(&self, z: &Zone) -> Result<(), ModelError> {
+        self.check_copper_layer(z.layer, "zone")?;
+        self.check_net(z.net, "zone")?;
+        check_contour(&z.outline, "zone outline")?;
+        if z.holes.len() > MAX_ZONE_HOLES {
+            return Err(ModelError::TooMany("zone holes"));
+        }
+        z.holes.iter().try_for_each(|h| check_contour(h, "zone hole"))?;
+        check_size(z.clearance, "zone clearance", true)?;
+        check_size(z.min_width, "zone minimum width", true)?;
+        if let ZoneFill::Hatched { width, gap } = z.fill {
+            check_size(width, "zone hatch width", false)?;
+            check_size(gap, "zone hatch gap", false)?;
+        }
+        if let PadConnection::Relief { gap, spoke } = z.pads {
+            check_size(gap, "thermal relief gap", false)?;
+            check_size(spoke, "thermal relief spoke", false)?;
+        }
+        check_poured(&z.filled)
     }
 
     fn check_pad(&self, p: &Pad) -> Result<(), ModelError> {
@@ -514,6 +583,10 @@ fn check_contour(c: &Contour, what: &'static str) -> Result<(), ModelError> {
     if c.edges.len() > MAX_POINTS {
         return Err(ModelError::TooMany("contour edges"));
     }
+    // A point alone is no outline; the smallest one is a single arc that is a full circle.
+    if c.edges.is_empty() {
+        return Err(ModelError::BadArea(what, "an outline needs an edge"));
+    }
     check_point(c.start, what)?;
     for e in &c.edges {
         match *e {
@@ -535,8 +608,53 @@ fn check_opening(o: Opening, what: &'static str) -> Result<(), ModelError> {
     }
 }
 
+/// The copper of a poured zone: a bounded number of areas and points, every ring with at least
+/// the three corners an area needs, and every point within the design range.
+fn check_poured(filled: &[Polygon]) -> Result<(), ModelError> {
+    if filled.len() > MAX_ZONE_POLYGONS {
+        return Err(ModelError::TooMany("zone fill areas"));
+    }
+    let mut points = 0_usize;
+    for ring in filled.iter().flat_map(|area| std::iter::once(&area.outer).chain(&area.holes)) {
+        if ring.len() < 3 {
+            return Err(ModelError::BadArea("zone fill", items::FEW_CORNERS));
+        }
+        points = points.saturating_add(ring.len());
+        if points > MAX_POINTS {
+            return Err(ModelError::TooMany("zone fill points"));
+        }
+        ring.iter().try_for_each(|&p| check_point(p, "zone fill"))?;
+    }
+    Ok(())
+}
+
+fn check_board_hole(h: &BoardHole) -> Result<(), ModelError> {
+    check_point(h.position, "hole position")?;
+    check_hole(&h.hole)
+}
+
+/// Expansions may be negative; sizes are positive, and a via's drill is smaller than its copper,
+/// as every via must be.
+pub(crate) fn check_design(d: &DesignSettings) -> Result<(), ModelError> {
+    let max = MAX_ABS.unsigned_abs();
+    if d.mask_expansion.0.unsigned_abs() > max {
+        return Err(ModelError::OutOfRange("solder mask expansion"));
+    }
+    if d.paste_expansion.0.unsigned_abs() > max {
+        return Err(ModelError::OutOfRange("paste expansion"));
+    }
+    check_size(d.clearance, "clearance", true)?;
+    check_size(d.track_width, "track width", false)?;
+    check_size(d.via_diameter, "via diameter", false)?;
+    check_size(d.via_drill, "via drill", false)?;
+    if d.via_drill >= d.via_diameter {
+        return Err(ModelError::BadSize("via drill (smaller than its diameter)"));
+    }
+    check_point(d.origin, "origin")
+}
+
 fn check_hole(h: &Hole) -> Result<(), ModelError> {
-    check_size(h.diameter, "pad hole diameter", false)?;
+    check_size(h.diameter, "hole diameter", false)?;
     if let Some(slot) = h.slot {
         check_size(slot.length, "slot length", false)?;
         // A slot no longer than it is wide is a round hole, and a slot turned half a turn is the
@@ -781,7 +899,7 @@ mod tests {
         assert!(matches!(check(Pad { number: " ".to_owned(), ..smd() }), Err(ModelError::BadName(..))), "no number is empty, not blank");
         assert!(matches!(check(Pad { number: "x".repeat(MAX_NAME_CHARS + 1), ..smd() }), Err(ModelError::BadName(..))));
 
-        assert_eq!(check(around(Hole::round(Nm(0), true))), Err(ModelError::BadSize("pad hole diameter")));
+        assert_eq!(check(around(Hole::round(Nm(0), true))), Err(ModelError::BadSize("hole diameter")));
         assert_eq!(check(around(slot(2 * MM))), Ok(()));
         let too_short = Err(ModelError::BadSize("slot length (longer than the slot is wide)"));
         assert_eq!(check(around(slot(MM))), too_short);
@@ -1062,6 +1180,381 @@ mod tests {
             }
             assert_eq!(b.validate(), Err(ModelError::OutOfRange("via mask expansion")));
         }
+    }
+
+    fn square(x: i64, y: i64, side: i64) -> Contour {
+        Contour::rect(circuitcraft_geom::Rect::from_corners(p(x, y), p(x + side, y + side)))
+    }
+
+    /// A solid ground zone on the top copper: 20 mm square, not poured.
+    fn zone(b: &mut Board) -> Zone {
+        let net = match b.net_by_name("GND") {
+            Some(n) => n.id,
+            None => b.add_net("GND").expect("net"),
+        };
+        Zone {
+            id: ItemId::from_u128(7),
+            layer: TOP_COPPER,
+            net: Some(net),
+            outline: square(0, 0, 20 * MM),
+            holes: Vec::new(),
+            clearance: Nm(200_000),
+            min_width: Nm(150_000),
+            priority: 0,
+            fill: ZoneFill::Solid,
+            pads: PadConnection::Relief { gap: Nm(250_000), spoke: Nm(300_000) },
+            keep_islands: false,
+            filled: Vec::new(),
+        }
+    }
+
+    /// The board with `change` made to its one zone, validated.
+    fn with_zone(change: impl FnOnce(&mut Zone)) -> Result<(), ModelError> {
+        let mut b = Board::new("x");
+        let mut z = zone(&mut b);
+        change(&mut z);
+        b.zones.insert(z).expect("room");
+        b.validate()
+    }
+
+    #[test]
+    fn a_zone_holds_its_holes_its_settings_and_its_poured_copper() {
+        let mut b = Board::new("x");
+        let mut z = zone(&mut b);
+        z.holes = vec![square(5 * MM, 5 * MM, MM)];
+        z.fill = ZoneFill::Hatched { width: Nm(200_000), gap: Nm(400_000) };
+        // Poured: one area with a hole in it.
+        let ring = |x: i64, side: i64| vec![p(x, x), p(x + side, x), p(x + side, x + side), p(x, x + side)];
+        z.filled = vec![Polygon { outer: ring(0, 20 * MM), holes: vec![ring(5 * MM, MM)] }];
+        b.zones.insert(z).expect("room");
+        assert_eq!(b.validate(), Ok(()));
+        let first = serde_json::to_string_pretty(&b).expect("json");
+        let back: Board = serde_json::from_str(&first).expect("parse");
+        assert_eq!(back, b);
+        assert_eq!(serde_json::to_string_pretty(&back).expect("json"), first, "re-save must be byte-identical");
+        // Each choice is written in a word, or under one.
+        let json = serde_json::to_value(&b).expect("json");
+        assert_eq!(json.pointer("/zones/0/fill"), Some(&serde_json::json!({ "hatched": { "width": 200_000, "gap": 400_000 } })));
+        assert_eq!(json.pointer("/zones/0/pads"), Some(&serde_json::json!({ "relief": { "gap": 250_000, "spoke": 300_000 } })));
+        for (pads, word) in [(PadConnection::Solid, "solid"), (PadConnection::None, "none")] {
+            assert_eq!(serde_json::to_value(pads).expect("json"), serde_json::json!(word));
+        }
+        assert_eq!(serde_json::to_value(ZoneFill::Solid).expect("json"), serde_json::json!("solid"));
+    }
+
+    #[test]
+    fn validate_refuses_zones_that_cannot_be_poured() {
+        assert_eq!(with_zone(|_| {}), Ok(()));
+        assert_eq!(with_zone(|z| z.layer = TOP_SILK), Err(ModelError::BadLayer("zone", "copper")));
+        assert_eq!(with_zone(|z| z.net = Some(NetId::from_u128(99))), Err(ModelError::UnknownNet("zone")));
+        assert_eq!(with_zone(|z| z.outline.start = p(i64::MAX, 0)), Err(ModelError::OutOfRange("zone outline")));
+        assert_eq!(with_zone(|z| z.holes = vec![square(i64::MIN, 0, 1)]), Err(ModelError::OutOfRange("zone hole")));
+        assert_eq!(with_zone(|z| z.holes = vec![square(0, 0, 1); MAX_ZONE_HOLES]), Ok(()));
+        assert_eq!(with_zone(|z| z.holes = vec![square(0, 0, 1); MAX_ZONE_HOLES + 1]), Err(ModelError::TooMany("zone holes")));
+        assert_eq!(with_zone(|z| z.clearance = Nm(-1)), Err(ModelError::BadSize("zone clearance")));
+        assert_eq!(with_zone(|z| z.min_width = Nm(0)), Ok(()));
+        assert_eq!(with_zone(|z| z.min_width = Nm(-1)), Err(ModelError::BadSize("zone minimum width")));
+        let hatched = |width: i64, gap: i64| with_zone(|z| z.fill = ZoneFill::Hatched { width: Nm(width), gap: Nm(gap) });
+        assert_eq!(hatched(1, 1), Ok(()));
+        assert_eq!(hatched(0, 1), Err(ModelError::BadSize("zone hatch width")));
+        assert_eq!(hatched(1, 0), Err(ModelError::BadSize("zone hatch gap")));
+        let relief = |gap: i64, spoke: i64| with_zone(|z| z.pads = PadConnection::Relief { gap: Nm(gap), spoke: Nm(spoke) });
+        assert_eq!(relief(1, 1), Ok(()));
+        assert_eq!(relief(0, 1), Err(ModelError::BadSize("thermal relief gap")));
+        assert_eq!(relief(1, i64::MAX), Err(ModelError::BadSize("thermal relief spoke")));
+    }
+
+    #[test]
+    fn validate_refuses_poured_copper_that_is_no_area() {
+        let triangle = || vec![p(0, 0), p(MM, 0), p(0, MM)];
+        let poured = |filled: Vec<Polygon>| with_zone(|z| z.filled = filled);
+        assert_eq!(poured(vec![Polygon::new(triangle())]), Ok(()));
+        let corners = Err(ModelError::BadArea("zone fill", "an area or a hole in one needs at least three corners"));
+        assert_eq!(poured(vec![Polygon::new(vec![p(0, 0), p(MM, 0)])]), corners);
+        assert_eq!(poured(vec![Polygon::default()]), corners);
+        assert_eq!(poured(vec![Polygon { outer: triangle(), holes: vec![Vec::new()] }]), corners);
+        assert_eq!(poured(vec![Polygon::new(vec![p(0, 0), p(MM, 0), p(0, i64::MAX)])]), Err(ModelError::OutOfRange("zone fill")));
+        assert_eq!(
+            poured(vec![Polygon { outer: triangle(), holes: vec![vec![p(0, 0), p(1, 0), p(i64::MIN, 1)]] }]),
+            Err(ModelError::OutOfRange("zone fill"))
+        );
+        // The points of every area and hole count against one limit.
+        let big = || Polygon { outer: triangle(), holes: vec![vec![p(0, 0); MAX_POINTS / 2]] };
+        assert_eq!(poured(vec![big(), big()]), Err(ModelError::TooMany("zone fill points")));
+        assert_eq!(poured(vec![Polygon::new(triangle()); MAX_ZONE_POLYGONS + 1]), Err(ModelError::TooMany("zone fill areas")));
+        // A ring without three corners is refused as it is read, so a file of empty rings can't
+        // fill the memory before the board is checked: the second hole here is never reached.
+        let mut b = Board::new("x");
+        let z = zone(&mut b);
+        b.zones.insert(z).expect("room");
+        let json = serde_json::to_value(&b).expect("json");
+        let read = |filled: &str| {
+            let mut json = json.clone();
+            if let Some(f) = json.pointer_mut("/zones/0/filled") {
+                *f = serde_json::from_str(filled).expect("json");
+            }
+            serde_json::from_value::<Board>(json).map(|_| ()).map_err(|e| e.to_string())
+        };
+        let ring = r#"[{"x":0,"y":0},{"x":9,"y":0},{"x":0,"y":9}]"#;
+        assert_eq!(read(&format!(r#"[{{"outer":{ring},"holes":[{ring}]}}]"#)), Ok(()));
+        for few in [r#"[{"outer":[],"holes":[]}]"#.to_owned(), format!(r#"[{{"outer":{ring},"holes":[[],7]}}]"#)] {
+            assert_eq!(read(&few), Err(items::FEW_CORNERS.to_owned()), "{few}");
+        }
+        assert!(read(&format!(r#"[{{"outer":{ring},"holes":[],"extra":1}}]"#)).is_err_and(|e| e.contains("unknown field")));
+        // A file is refused while it is read, before the extra area takes any memory.
+        let mut b = Board::new("x");
+        let mut z = zone(&mut b);
+        z.filled = vec![Polygon::new(triangle()); MAX_ZONE_POLYGONS + 1];
+        b.zones.insert(z).expect("room");
+        let err = serde_json::from_str::<Board>(&serde_json::to_string(&b).expect("json")).err().map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains(&format!("more than {MAX_ZONE_POLYGONS}"))));
+    }
+
+    fn keepout(id: u128) -> Keepout {
+        Keepout { id: ItemId::from_u128(id), layer: BOTTOM_COPPER, outline: square(0, 0, 5 * MM), tracks: false, vias: true, zones: false }
+    }
+
+    #[test]
+    fn a_keepout_says_what_it_keeps_out_of_which_copper_layer() {
+        let check = |k: Keepout| {
+            let mut b = Board::new("x");
+            b.keepouts.insert(k).expect("room");
+            b.validate()
+        };
+        // Vias only, on the bottom layer: more than a drawing on a keepout layer can say.
+        assert_eq!(check(keepout(2)), Ok(()));
+        assert_eq!(check(Keepout { vias: false, zones: true, ..keepout(2) }), Ok(()));
+        assert_eq!(check(Keepout { vias: false, ..keepout(2) }), Err(ModelError::BadArea("keepout", "it must keep tracks, vias or zones out")));
+        assert_eq!(check(Keepout { layer: layer_ids::KEEPOUT, ..keepout(2) }), Err(ModelError::BadLayer("keepout", "copper")));
+        assert_eq!(check(Keepout { outline: square(i64::MAX, 0, 0), ..keepout(2) }), Err(ModelError::OutOfRange("keepout outline")));
+        assert_eq!(check(keepout(0)), Err(ModelError::BadId(ItemId::from_u128(0).to_string())));
+    }
+
+    #[test]
+    fn a_hole_can_be_on_the_board_without_a_footprint() {
+        let mut b = Board::new("x");
+        let h = b.add_hole(p(3 * MM, 3 * MM), Hole::round(Nm(3_200_000), false)).expect("hole");
+        let slot = Hole { slot: Some(Slot { length: Nm(4 * MM), rotation: Rotation(90_000) }), ..Hole::round(Nm(MM), true) };
+        let s = b.add_hole(p(10 * MM, 3 * MM), slot).expect("slot");
+        assert_eq!(b.holes.get(h).map(|h| (h.position, h.hole.diameter, h.hole.plated)), Some((p(3 * MM, 3 * MM), Nm(3_200_000), false)));
+        assert_eq!(b.validate(), Ok(()));
+        let back: Board = serde_json::from_str(&serde_json::to_string(&b).expect("json")).expect("parse");
+        assert_eq!(back, b);
+        // A hole is checked like the hole of a pad, and nothing is added when it is refused.
+        assert_eq!(b.add_hole(p(0, 0), Hole::round(Nm(0), false)), Err(ModelError::BadSize("hole diameter")));
+        assert_eq!(b.add_hole(p(i64::MAX, 0), Hole::round(Nm(MM), false)), Err(ModelError::OutOfRange("hole position")));
+        let short = Hole { slot: Some(Slot { length: Nm(MM), rotation: Rotation(0) }), ..Hole::round(Nm(MM), false) };
+        assert!(matches!(b.add_hole(p(0, 0), short), Err(ModelError::BadSize(_))));
+        assert_eq!(b.holes.len(), 2);
+        // A hole or a keepout filed under an id that is no longer its own is refused.
+        let mut misfiled = b.clone();
+        if let Some(hole) = misfiled.holes.get_mut(h) {
+            hole.id = ItemId::from_u128(77);
+        }
+        assert_eq!(misfiled.validate(), Err(ModelError::BadId(h.to_string())));
+        let mut misfiled = b.clone();
+        misfiled.keepouts.insert(keepout(78)).expect("room");
+        if let Some(k) = misfiled.keepouts.get_mut(ItemId::from_u128(78)) {
+            k.id = ItemId::from_u128(77);
+        }
+        assert_eq!(misfiled.validate(), Err(ModelError::BadId(ItemId::from_u128(78).to_string())));
+        // Holes and keepouts share the ids of the board, and are removed like any item.
+        b.keepouts.insert(keepout(h.as_u128())).expect("room");
+        assert_eq!(b.validate(), Err(ModelError::BadId(h.to_string())));
+        b.keepouts.remove(h);
+        let k = b.fresh_id().expect("id");
+        b.keepouts.insert(Keepout { id: k, ..keepout(1) }).expect("room");
+        assert_eq!(b.validate(), Ok(()));
+        for id in [h, s, k] {
+            assert_eq!(b.remove(id), Ok(()));
+            assert_eq!(b.remove(id), Err(ModelError::UnknownItem(id)));
+        }
+        assert!(b.holes.is_empty() && b.keepouts.is_empty());
+    }
+
+    #[test]
+    fn design_settings_decide_what_items_leave_to_them() {
+        let d = DesignSettings { mask_expansion: Nm(50_000), paste_expansion: Nm(-25_000), tent_vias: true, ..DesignSettings::default() };
+        let own = Opening::Open { by: Some(Nm(7)) };
+        let shared = Opening::Open { by: None };
+        assert_eq!([Opening::Rules, shared, own, Opening::Closed].map(|o| d.pad_mask(o)), [Some(Nm(50_000)), Some(Nm(50_000)), Some(Nm(7)), None]);
+        assert_eq!([Opening::Rules, shared, own, Opening::Closed].map(|o| d.pad_paste(o)), [Some(Nm(-25_000)), Some(Nm(-25_000)), Some(Nm(7)), None]);
+        // A via that leaves it to the settings is tented, or open by the mask expansion.
+        assert_eq!([Opening::Rules, shared, own, Opening::Closed].map(|o| d.via_mask(o)), [None, Some(Nm(50_000)), Some(Nm(7)), None]);
+        let open = DesignSettings { tent_vias: false, ..d };
+        assert_eq!(open.via_mask(Opening::Rules), Some(Nm(50_000)));
+    }
+
+    #[test]
+    fn validate_refuses_design_settings_nothing_could_be_made_to() {
+        let check = |design: DesignSettings| Board { design, ..Board::new("x") }.validate();
+        let d = DesignSettings::default;
+        assert_eq!(check(d()), Ok(()));
+        assert_eq!(check(DesignSettings { mask_expansion: Nm(-MM), paste_expansion: Nm(MM), clearance: Nm(0), ..d() }), Ok(()));
+        assert_eq!(check(DesignSettings { mask_expansion: Nm(i64::MIN), ..d() }), Err(ModelError::OutOfRange("solder mask expansion")));
+        assert_eq!(check(DesignSettings { paste_expansion: Nm(i64::MAX), ..d() }), Err(ModelError::OutOfRange("paste expansion")));
+        assert_eq!(check(DesignSettings { clearance: Nm(-1), ..d() }), Err(ModelError::BadSize("clearance")));
+        assert_eq!(check(DesignSettings { track_width: Nm(0), ..d() }), Err(ModelError::BadSize("track width")));
+        assert_eq!(check(DesignSettings { via_diameter: Nm(0), ..d() }), Err(ModelError::BadSize("via diameter")));
+        assert_eq!(check(DesignSettings { via_drill: Nm(0), ..d() }), Err(ModelError::BadSize("via drill")));
+        let same = DesignSettings { via_drill: d().via_diameter, ..d() };
+        assert_eq!(check(same), Err(ModelError::BadSize("via drill (smaller than its diameter)")));
+        assert_eq!(check(DesignSettings { origin: p(0, i64::MIN), ..d() }), Err(ModelError::OutOfRange("origin")));
+    }
+
+    #[test]
+    fn a_file_writes_each_kind_under_its_name_and_every_field() {
+        let mut b = board_with_pads(vec![Pad::smd("1", p(0, 0), rect(MM, MM))]);
+        b.add_track(TOP_COPPER, Nm(1), line(p(0, 0), p(1, 0)), None).expect("track");
+        let json = serde_json::to_value(&b).expect("json");
+        assert_eq!(json.pointer("/tracks/0/path"), Some(&serde_json::json!({ "line": { "from": { "x": 0, "y": 0 }, "to": { "x": 1, "y": 0 } } })));
+        assert_eq!(json.pointer("/footprints/0/pads/0/front/shape"), Some(&serde_json::json!({ "rect": { "width": MM, "height": MM } })));
+        assert_eq!(json.pointer("/footprints/0/pads/0/front/mask"), Some(&serde_json::json!("rules")));
+        assert_eq!(serde_json::to_value(Opening::Open { by: None }).expect("json"), serde_json::json!({ "open": { "by": null } }));
+        assert_eq!(serde_json::to_value(Opening::Closed).expect("json"), serde_json::json!("closed"));
+        assert_eq!(serde_json::from_value::<Board>(json.clone()).ok().as_ref(), Some(&b));
+        // The kind an object used to be tagged with is a field no object has.
+        assert!(serde_json::from_str::<TrackPath>(r#"{"kind":"line","from":{"x":0,"y":0},"to":{"x":1,"y":0}}"#).is_err());
+        assert!(serde_json::from_str::<Opening>(r#"{"open":{}}"#).is_err(), "`by` must be written");
+    }
+
+    /// A board that holds one of everything a file can say, in every kind it comes in.
+    fn everything() -> Board {
+        let mut b = Board::new("Everything");
+        let gnd = b.add_net("GND").expect("net");
+        let id = |b: &Board| b.fresh_id().expect("id");
+        let arc = circuitcraft_geom::Arc::new(p(0, 0), p(MM, MM), p(2 * MM, 0));
+        b.outline = Some(square(0, 0, 50 * MM));
+        b.cutouts = vec![Contour::circle(p(25 * MM, 25 * MM), Nm(MM)).expect("circle")];
+        b.add_track(TOP_COPPER, Nm(250_000), line(p(0, 0), p(MM, 0)), Some(gnd)).expect("track");
+        b.add_track(BOTTOM_COPPER, Nm(250_000), TrackPath::Arc { arc }, None).expect("track");
+        b.add_via(p(MM, 0), Nm(600_000), Nm(300_000), Some(gnd)).expect("via");
+        b.add_hole(p(3 * MM, 3 * MM), Hole::round(Nm(3 * MM), false)).expect("hole");
+        let mut z = zone(&mut b);
+        z.holes = vec![square(5 * MM, 5 * MM, MM)];
+        z.fill = ZoneFill::Hatched { width: Nm(200_000), gap: Nm(400_000) };
+        z.filled = vec![Polygon { outer: vec![p(0, 0), p(MM, 0), p(0, MM)], holes: vec![vec![p(1, 1), p(9, 1), p(1, 9)]] }];
+        b.zones.insert(Zone { id: id(&b), ..z }).expect("room");
+        b.keepouts.insert(Keepout { id: id(&b), ..keepout(1) }).expect("room");
+        let note = label(1, fixed("REV A"));
+        let text = Text {
+            id: id(&b),
+            layer: TOP_SILK,
+            text: "REV A".to_owned(),
+            position: note.position,
+            height: note.height,
+            stroke: note.stroke,
+            rotation: Rotation(0),
+            mirrored: false,
+            justify: Justify::Left,
+        };
+        b.texts.insert(text).expect("room");
+        let shapes = || {
+            [
+                GraphicShape::Line { from: p(0, 0), to: p(MM, 0) },
+                GraphicShape::Arc { arc },
+                GraphicShape::Circle { center: p(0, 0), radius: Nm(MM) },
+                GraphicShape::Polygon { outline: square(0, 0, MM), filled: true },
+            ]
+        };
+        for shape in shapes() {
+            b.graphics.insert(Graphic { id: id(&b), layer: TOP_SILK, width: Nm(100_000), shape }).expect("room");
+        }
+        // A footprint with a pad of every shape, a slot, openings of every kind, and every text.
+        let slot = Hole { slot: Some(Slot { length: Nm(2 * MM), rotation: Rotation(0) }), ..Hole::round(Nm(MM), true) };
+        let mut openings = Pad::smd("1", p(0, 0), rect(MM, MM));
+        openings.net = Some(gnd);
+        if let Some(front) = &mut openings.front {
+            (front.mask, front.paste) = (Opening::Open { by: Some(Nm(50_000)) }, Opening::Open { by: None });
+        }
+        let mut closed = Pad::through_hole("2", p(5 * MM, 0), PadShape::Oval { width: Nm(2 * MM), height: Nm(3 * MM) }, slot);
+        closed.inner = Some(PadShape::Circle { diameter: Nm(2 * MM) });
+        let pads = vec![
+            openings,
+            closed,
+            Pad::smd("3", p(10 * MM, 0), PadShape::RoundRect { width: Nm(MM), height: Nm(MM), radius: Nm(100_000) }),
+            Pad::smd("4", p(15 * MM, 0), PadShape::Custom { outline: square(0, 0, MM) }),
+        ];
+        let footprint = Footprint {
+            id: id(&b),
+            reference: "J1".to_owned(),
+            value: "USB-C".to_owned(),
+            link: Some(LibraryLink { library: "Connectors".to_owned(), footprint: "USB-C-16P".to_owned() }),
+            assembly: Assembly { mounting: Mounting::SurfaceMount, in_bom: true, in_placement: true, fitted: true },
+            position: p(20 * MM, 20 * MM),
+            rotation: Rotation(90_000),
+            side: Side::Bottom,
+            pads,
+            graphics: shapes().into_iter().map(|shape| Graphic { id: id(&b), layer: TOP_SILK, width: Nm(100_000), shape }).collect(),
+            texts: [TextContent::Reference, TextContent::Value, fixed("PIN 1")]
+                .into_iter()
+                .map(|c| FootprintText { id: id(&b), ..label(1, c) })
+                .collect(),
+        };
+        b.footprints.insert(footprint).expect("room");
+        b
+    }
+
+    /// Every object in `json`: where it is (as a JSON pointer) and the keys it has.
+    fn objects(json: &serde_json::Value, at: String, found: &mut Vec<(String, Vec<String>)>) {
+        match json {
+            serde_json::Value::Object(o) => {
+                found.push((at.clone(), o.keys().cloned().collect()));
+                o.iter().for_each(|(key, v)| objects(v, format!("{at}/{key}"), found));
+            }
+            serde_json::Value::Array(a) => a.iter().enumerate().for_each(|(i, v)| objects(v, format!("{at}/{i}"), found)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn every_field_in_a_file_must_be_there_and_no_other_may_be() {
+        let b = everything();
+        assert_eq!(b.validate(), Ok(()));
+        let json = serde_json::to_value(&b).expect("json");
+        assert_eq!(serde_json::from_value::<Board>(json.clone()).ok().as_ref(), Some(&b));
+        let mut found = Vec::new();
+        objects(&json, String::new(), &mut found);
+        // The board really holds every kind: each is written somewhere, under its name.
+        let kinds = [
+            "line",
+            "arc",
+            "circle",
+            "polygon",
+            "rect",
+            "round_rect",
+            "oval",
+            "custom",
+            "open",
+            "hatched",
+            "relief",
+            "fixed",
+            "slot",
+            "link",
+            "outline",
+            "design",
+            "hole",
+            "front",
+            "back",
+            "assembly",
+        ];
+        for kind in kinds {
+            assert!(found.iter().any(|(_, keys)| keys.iter().any(|k| k == kind)), "the board has no {kind}");
+        }
+        let reads = |change: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>), at: &str| {
+            let mut json = json.clone();
+            change(json.pointer_mut(at).and_then(|v| v.as_object_mut()).expect("an object"));
+            serde_json::from_value::<Board>(json).is_ok()
+        };
+        // A field that may be empty is written as null: left out, the file is refused. A field
+        // this build doesn't know is refused too; reading on would drop it at the next save.
+        for (at, keys) in &found {
+            for key in keys {
+                assert!(!reads(&|o| drop(o.remove(key)), at), "{at} reads without `{key}`");
+            }
+            assert!(!reads(&|o| drop(o.insert("extra".to_owned(), serde_json::json!(1))), at), "{at} reads with a field nobody knows");
+        }
+        assert!(found.len() > 150, "{} objects", found.len());
     }
 
     #[test]

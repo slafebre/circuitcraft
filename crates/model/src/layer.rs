@@ -39,6 +39,7 @@ pub enum LayerKind {
 
 /// One layer of the board, listed in a [`LayerStack`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Layer {
     /// Stable identity.
     pub id: LayerId,
@@ -47,16 +48,19 @@ pub struct Layer {
     /// What the layer is for.
     pub kind: LayerKind,
     /// Physical thickness, where it matters (copper and dielectric).
+    #[serde(deserialize_with = "crate::items::required")]
     pub thickness: Option<Nm>,
     /// The side of the board the layer belongs to, if it belongs to one. Solder mask, paste,
     /// silkscreen, courtyard and fabrication layers always have a side; keepout and mechanical
     /// layers may have one; dielectric and outline layers never do. Always `None` for copper,
     /// whose side follows from its place in the stack: ask [`LayerStack::side`].
+    #[serde(deserialize_with = "crate::items::required")]
     pub side: Option<Side>,
     /// The layer of the same kind on the other side of the board, which is paired with this one
     /// in turn. A layer on a side always has one, and a layer on neither side never does. Always
     /// `None` for copper, which is mirrored by its place in the stack: ask
     /// [`LayerStack::flipped`].
+    #[serde(deserialize_with = "crate::items::required")]
     pub pair: Option<LayerId>,
 }
 
@@ -66,6 +70,7 @@ pub const MAX_LAYERS: usize = 1_024;
 /// The layers of a board: the physical build-up, and the layers that only hold drawings (outline,
 /// courtyard, fabrication, keepout, mechanical).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LayerStack {
     /// Layers. Copper and dielectric layers are in order from top to bottom. The order of the
     /// other layers has no physical meaning; it is the order in which layer lists show them.
@@ -500,9 +505,23 @@ mod tests {
 
     #[test]
     fn decoding_refuses_too_many_layers() {
-        let one = r#"{"id":1,"name":"L","kind":"copper","thickness":null}"#;
+        let one = r#"{"id":1,"name":"L","kind":"copper","thickness":null,"side":null,"pair":null}"#;
         let stack = |n: usize| format!(r#"{{"layers":[{}]}}"#, vec![one; n].join(","));
         assert!(serde_json::from_str::<LayerStack>(&stack(MAX_LAYERS)).is_ok());
         assert!(serde_json::from_str::<LayerStack>(&stack(MAX_LAYERS + 1)).is_err());
+    }
+
+    #[test]
+    fn a_layer_is_written_in_full() {
+        let read = |layer: &str| serde_json::from_str::<Layer>(layer).map_err(|e| e.to_string());
+        let whole = r#"{"id":1,"name":"L","kind":"copper","thickness":null,"side":null,"pair":null}"#;
+        assert!(read(whole).is_ok());
+        // A field left out is not read as `null`, and a field this build doesn't know is refused.
+        for field in ["thickness", "side", "pair"] {
+            let without = whole.replace(&format!(r#","{field}":null"#), "");
+            assert!(read(&without).is_err_and(|e| e.contains(&format!("missing field `{field}`"))), "{field}");
+        }
+        let extra = whole.replace(r#""side""#, r#""colour":"red","side""#);
+        assert!(read(&extra).is_err_and(|e| e.contains("unknown field `colour`")));
     }
 }
