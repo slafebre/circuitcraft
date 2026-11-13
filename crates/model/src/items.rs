@@ -96,7 +96,7 @@ impl Rotation {
     }
 }
 
-/// Which side of the board a footprint is mounted on.
+/// A side of the board: the one a footprint is mounted on, or the one a layer belongs to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
@@ -105,6 +105,16 @@ pub enum Side {
     Top,
     /// The bottom side (mirrored).
     Bottom,
+}
+
+impl Side {
+    /// The other side.
+    pub fn opposite(self) -> Side {
+        match self {
+            Side::Top => Side::Bottom,
+            Side::Bottom => Side::Top,
+        }
+    }
 }
 
 /// A connection: everything on the same net must end up connected.
@@ -383,7 +393,8 @@ pub struct Footprint {
     #[serde(deserialize_with = "pads")]
     pub pads: Vec<Pad>,
     /// Silkscreen, courtyard and fabrication drawings, in footprint coordinates. Their layers are
-    /// the top-side layers; a bottom-side footprint flips them. At most [`MAX_FOOTPRINT_GRAPHICS`].
+    /// the top-side layers; a bottom-side footprint flips them ([`crate::LayerStack::flipped`]).
+    /// At most [`MAX_FOOTPRINT_GRAPHICS`].
     #[serde(deserialize_with = "footprint_graphics")]
     pub graphics: Vec<Graphic>,
 }

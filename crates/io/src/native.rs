@@ -407,7 +407,7 @@ fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circuitcraft_model::layer_ids::TOP_COPPER;
+    use circuitcraft_model::layer_ids::{TOP_COPPER, TOP_SILK};
     use circuitcraft_model::{Footprint, Hole, Opening, Pad, PadShape, Rotation, Side, Slot, TrackPath};
     use circuitcraft_units::{Nm, Point};
 
@@ -491,11 +491,19 @@ mod tests {
         dangling.nets.remove(gnd);
         let text = write_board(&dangling).expect("write");
         assert!(matches!(read_board(&text), Err(NativeError::Invalid(_))));
+        // A layer paired with itself: flipping would go nowhere.
+        let mut own_pair = b.clone();
+        if let Some(l) = own_pair.stack.layers.iter_mut().find(|l| l.id == TOP_SILK) {
+            l.pair = Some(TOP_SILK);
+        }
+        let text = write_board(&own_pair).expect("write");
+        assert!(matches!(read_board(&text), Err(NativeError::Invalid(ModelError::BadStack(..)))));
     }
 
     #[test]
     fn hostile_text_is_an_error_not_a_crash() {
-        let good = write_board(&blinky()).expect("write");
+        let board = blinky();
+        let good = write_board(&board).expect("write");
         let deep = format!("{{\"format\":\"circuitcraft.board\",\"version\":1,\"board\":{}", "[".repeat(100_000));
         let cases = [
             String::new(),
@@ -511,10 +519,14 @@ mod tests {
         for text in &cases {
             assert!(read_board(text).is_err(), "{:?}", text.get(..text.len().min(80)));
         }
-        // Every prefix of a good file: no panics, and only the whole file reads.
-        for cut in (0..good.len()).step_by(7) {
+        // Every prefix of a good file: no panics, and only the whole file reads. The whole file is
+        // everything up to its closing brace; the newline after it can be missing.
+        let whole = good.trim_end().len();
+        assert_eq!(read_board(&good).ok().as_ref(), Some(&board));
+        assert_eq!(read_board(good.get(..whole).unwrap_or_default()).ok().as_ref(), Some(&board));
+        for cut in (0..whole).step_by(7) {
             if let Some(prefix) = good.get(..cut) {
-                assert!(read_board(prefix).is_err());
+                assert!(read_board(prefix).is_err(), "a file cut at byte {cut} of {whole} was read");
             }
         }
     }

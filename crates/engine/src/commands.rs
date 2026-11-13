@@ -259,8 +259,7 @@ fn board_info(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     object(params)?;
     let b = s.board();
     let stack = &b.stack;
-    let layers: Vec<Value> =
-        stack.layers.iter().map(|l| json!({ "name": l.name, "kind": l.kind, "thicknessMm": l.thickness.map(|t| t.to_mm()) })).collect();
+    let layers: Vec<Value> = stack.layers.iter().map(|l| layer_info(stack, l)).collect();
     Ok(json!({
         "name": b.name,
         "copperLayers": stack.copper_count(),
@@ -278,6 +277,18 @@ fn board_info(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
         "undo": s.doc().undo_label(),
         "redo": s.doc().redo_label(),
     }))
+}
+
+/// One layer for `board.info`: the side it is on, and the layer its drawings flip to (`pair`),
+/// by name, as commands name layers.
+fn layer_info(stack: &circuitcraft_model::LayerStack, l: &circuitcraft_model::Layer) -> Value {
+    json!({
+        "name": l.name,
+        "kind": l.kind,
+        "thicknessMm": l.thickness.map(|t| t.to_mm()),
+        "side": stack.side(l.id),
+        "pair": stack.flipped(l.id).filter(|&p| p != l.id).and_then(|p| stack.get(p)).map(|p| p.name.as_str()),
+    })
 }
 
 fn file_detect(_s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -389,6 +400,13 @@ mod tests {
         let t = s.execute("track.add", &json!({ "layer": "Top Copper", "width": 0.25, "from": [0, 0], "to": [10, 0], "net": "GND" })).expect("track");
         s.execute("via.add", &json!({ "at": [10, 0], "net": "GND" })).expect("via");
         let info = s.execute("board.info", &Value::Null).expect("info");
+        let layer = |name: &str| info["layers"].as_array().and_then(|l| l.iter().find(|l| l["name"] == name)).cloned().unwrap_or_default();
+        assert_eq!(
+            layer("Top Courtyard"),
+            json!({ "name": "Top Courtyard", "kind": "courtyard", "thicknessMm": null, "side": "top", "pair": "Bottom Courtyard" })
+        );
+        assert_eq!(layer("Keepout"), json!({ "name": "Keepout", "kind": "keepout", "thicknessMm": null, "side": null, "pair": null }));
+        assert_eq!((&layer("Bottom Copper")["side"], &layer("Bottom Copper")["pair"]), (&json!("bottom"), &json!("Top Copper")));
         assert_eq!(info["counts"]["tracks"], 1);
         assert_eq!(info["counts"]["vias"], 1);
         assert_eq!(info["undo"], "Add Via");
