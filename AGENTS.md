@@ -89,8 +89,8 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 
 ## Quality gate
 
-Before every commit: `cargo xtask ci` (fmt, clippy with `-D warnings`, tests, assets, layers,
-wasm). Commit after each piece of work that builds.
+Before every commit: `cargo xtask ci` (fmt, clippy with `-D warnings`, tests, assets, licences,
+layers, wasm). Commit after each piece of work that builds.
 
 ## Running it
 
@@ -108,8 +108,13 @@ cd apps/circuitcraft-web && trunk serve                         # browser build 
 Dependencies and assets use SPDX identifiers. An expression is allowed when every identifier in it
 is on this list: `ISC`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `Apache-2.0`, `OFL-1.1`,
 `Ubuntu-font-1.0`, `Bitstream-Vera`, `CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`,
-`LicenseRef-Public-Domain`. Common exceptions such as `Unicode-3.0` (Unicode data tables) and
-`Zlib` need a maintainer's yes, recorded in ROADMAP.md's open decisions.
+`LicenseRef-Public-Domain`.
+
+Accepted exceptions are per crate, listed with their reasons in `xtask/src/licenses.rs`:
+`Unicode-3.0` (ICU4X and Unicode data crates), `Zlib` (foldhash, slotmap, zlib-rs) and `BSL-1.0`
+(clipboard-win, error-code), all pulled in by egui and eframe (decided 2026-11-13).
+`cargo xtask licenses`, part of `cargo xtask ci`, fails on any other licence. A new exception
+needs a maintainer's yes, recorded in ROADMAP.md, before it goes into that list.
 
 ## Contributions
 
