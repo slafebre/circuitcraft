@@ -1,25 +1,29 @@
 //! The design database.
 //!
 //! A [`Board`] holds its layer stack, outline, nets and items (footprints with pads, tracks, vias,
-//! zones, text and drawings). Items live in copy-on-write [`Items`] collections, so an undo
-//! snapshot of a whole board is cheap, and a [`Document`] keeps those snapshots for undo and redo.
+//! zones, text and drawings). Items live in copy-on-write [`Items`] collections that record what
+//! an edit touches, so a [`Document`] keeps each edit's [`ChangeSet`] for undo and redo, at a cost
+//! that follows the size of the edit, not the size of the board.
 //!
-//! Edits go through [`Board`] methods that check what they add ([`Board::validate`] checks a whole
+//! An edit runs inside [`Document::edit`] and changes the board through a [`BoardEdit`], whose
+//! methods check what they add and record what they change ([`Board::validate`] checks a whole
 //! board, for example one just read from a file). Everything is in whole nanometres.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod change;
 mod document;
 mod items;
 mod layer;
 mod store;
 
+pub use change::{BoardEdit, ChangeSet};
 pub use document::{Document, UNDO_LIMIT};
 pub use items::{
     Drill, Footprint, Graphic, GraphicShape, ItemId, Justify, MAX_FOOTPRINT_GRAPHICS, MAX_PADS, Net, NetId, Pad, PadKind, PadShape, Rotation, Side,
     Text, Track, TrackPath, Via, Zone,
 };
 pub use layer::{Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, ids as layer_ids};
-pub use store::{Items, Keyed, MAX_ITEMS};
+pub use store::{Change, Items, Keyed, MAX_ITEMS};
 
 use circuitcraft_geom::{Contour, Edge, MAX_POINTS};
 use circuitcraft_units::{MAX_ABS, Nm, Point};

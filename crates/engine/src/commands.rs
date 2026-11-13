@@ -274,6 +274,7 @@ fn board_info(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
             "zones": b.zones.len(),
         },
         "folder": s.folder().map(|f| f.to_string_lossy()),
+        "revision": s.doc().revision(),
         "undo": s.doc().undo_label(),
         "redo": s.doc().redo_label(),
     }))
@@ -331,6 +332,25 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The cost budget for edits (ROADMAP.md, "Performance on large boards"): adding 100,000
+    /// tracks one command at a time took 134 s and 2.3 GB while undo kept whole-board snapshots,
+    /// and takes well under a second with change sets in a release build. The limit is loose so a
+    /// slow CI machine passes, and tight enough that a cost growing with the board size fails.
+    #[test]
+    fn a_hundred_thousand_single_track_commands_stay_within_budget() {
+        let mut s = Session::new();
+        let start = std::time::Instant::now();
+        for i in 0..100_000_u32 {
+            let (x, y) = (f64::from(i / 1_000), f64::from(i % 1_000) * 0.01);
+            s.execute("track.add", &json!({ "layer": "Top Copper", "width": 0.2, "from": [x, y], "to": [x + 0.5, y] })).expect("track");
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(s.board().tracks.len(), 100_000);
+        assert!(elapsed < std::time::Duration::from_secs(30), "100,000 track.add commands took {elapsed:?}");
+        assert_eq!(s.execute("edit.undo", &Value::Null).expect("undo")["undone"], "Add Track");
+        assert_eq!(s.board().tracks.len(), 99_999);
     }
 
     #[test]

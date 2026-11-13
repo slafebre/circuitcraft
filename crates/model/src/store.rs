@@ -1,8 +1,8 @@
 //! A copy-on-write collection of board items, keyed by id.
 //!
-//! Each item sits behind an [`Arc`], so cloning a whole board (an undo snapshot) copies pointers,
-//! not items, and editing one item copies only that item ([`Arc::make_mut`]). Items are kept in id
-//! order, which also gives saved files a stable order.
+//! Each item sits behind an [`Arc`], so editing one item copies only that item
+//! ([`Arc::make_mut`]), and an edit's record of what it changed ([`Change`]) holds pointers, not
+//! copies. Items are kept in id order, which also gives saved files a stable order.
 //!
 //! Collections are bounded. Decoding refuses a list longer than its limit as it is read: the
 //! element past the limit is refused before any of it is read, so it allocates nothing.
@@ -12,6 +12,7 @@ use crate::ModelError;
 use serde::de::{DeserializeSeed, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -65,21 +66,42 @@ pub trait Keyed {
     fn id(&self) -> Self::Id;
 }
 
+/// What one edit did to one item: its value before and after (`None` when it didn't exist), so the
+/// edit can be undone and redone, and readers such as the renderer know what to redraw.
+#[derive(Debug, Clone)]
+pub struct Change<T: Keyed> {
+    /// The item's id.
+    pub id: T::Id,
+    /// The item before the edit; `None` when the edit added it.
+    pub before: Option<Arc<T>>,
+    /// The item after the edit; `None` when the edit removed it.
+    pub after: Option<Arc<T>>,
+}
+
 /// Items of one kind, keyed by id, shared copy-on-write.
+///
+/// While an edit is being recorded, the collection keeps each touched item's value from before
+/// its first change (a pointer, not a copy), so the edit becomes a list of [`Change`]s that costs
+/// what it touched, not the size of the board.
 #[derive(Debug)]
 pub struct Items<T: Keyed> {
     map: BTreeMap<T::Id, Arc<T>>,
+    /// Values from before the edit being recorded, by id; `None` when nothing is being recorded.
+    /// An entry holding `None` (added by this edit) exists only while its item does, so the record
+    /// holds at most the items there at the start plus the current ones.
+    journal: Option<BTreeMap<T::Id, Option<Arc<T>>>>,
 }
 
 impl<T: Keyed> Clone for Items<T> {
+    /// A copy of the items; a recording in progress is not copied.
     fn clone(&self) -> Self {
-        Items { map: self.map.clone() }
+        Items { map: self.map.clone(), journal: None }
     }
 }
 
 impl<T: Keyed> Default for Items<T> {
     fn default() -> Self {
-        Items { map: BTreeMap::new() }
+        Items { map: BTreeMap::new(), journal: None }
     }
 }
 
@@ -124,12 +146,28 @@ impl<T: Keyed> Items<T> {
         if self.map.len() >= MAX_ITEMS && !self.map.contains_key(&id) {
             return Err(ModelError::TooMany("items"));
         }
-        Ok(self.map.insert(id, Arc::new(item)))
+        let old = self.map.insert(id, Arc::new(item));
+        self.record(id, &old);
+        Ok(old)
     }
 
     /// Removes and returns the item with this id.
     pub fn remove(&mut self, id: T::Id) -> Option<Arc<T>> {
-        self.map.remove(&id)
+        let old = self.map.remove(&id);
+        if let (Some(_), Some(journal)) = (&old, &mut self.journal) {
+            match journal.entry(id) {
+                // Added by this edit: removing it cancels the addition, so the record keeps
+                // nothing for it.
+                Entry::Occupied(e) if e.get().is_none() => {
+                    e.remove();
+                }
+                Entry::Occupied(_) => {}
+                Entry::Vacant(e) => {
+                    e.insert(old.clone());
+                }
+            }
+        }
+        old
     }
 
     /// The first key whose item no longer reports that id (its `id` was changed through
@@ -137,12 +175,76 @@ impl<T: Keyed> Items<T> {
     pub fn mismatched_key(&self) -> Option<T::Id> {
         self.map.iter().find(|(k, v)| v.id() != **k).map(|(k, _)| *k)
     }
+
+    /// Keeps `before` as the value of `id` before the edit being recorded, unless an earlier change
+    /// in the same edit already kept one.
+    fn record(&mut self, id: T::Id, before: &Option<Arc<T>>) {
+        if let Some(journal) = &mut self.journal {
+            journal.entry(id).or_insert_with(|| before.clone());
+        }
+    }
+
+    /// Starts recording an edit (dropping any recording left unfinished).
+    pub(crate) fn begin(&mut self) {
+        self.journal = Some(BTreeMap::new());
+    }
+
+    /// Puts every item touched since [`Items::begin`] back as it was, and stops recording.
+    pub(crate) fn rollback(&mut self) {
+        for (id, before) in self.journal.take().unwrap_or_default() {
+            self.put(id, before);
+        }
+    }
+
+    /// Sets or clears one entry, without recording.
+    fn put(&mut self, id: T::Id, value: Option<Arc<T>>) {
+        match value {
+            Some(v) => self.map.insert(id, v),
+            None => self.map.remove(&id),
+        };
+    }
+
+    /// Puts each change's value from before (`forward == false`) or after (`forward == true`) the
+    /// edit in place, without recording.
+    pub(crate) fn apply(&mut self, changes: &[Change<T>], forward: bool) {
+        for c in changes {
+            self.put(c.id, if forward { c.after.clone() } else { c.before.clone() });
+        }
+    }
+}
+
+impl<T: Keyed + PartialEq> Items<T> {
+    /// Stops recording and returns what changed since [`Items::begin`], in id order. An item that
+    /// was touched but ends up equal to how it started is not a change, and its original is put
+    /// back, so the copy made for editing it doesn't stay around.
+    pub(crate) fn finish(&mut self) -> Vec<Change<T>> {
+        let mut changes = Vec::new();
+        for (id, before) in self.journal.take().unwrap_or_default() {
+            let after = self.map.get(&id).cloned();
+            match (before, after) {
+                // Defensive: `remove` drops the entry of an item added and removed by the edit.
+                (None, None) => {}
+                (Some(b), Some(a)) if b == a => {
+                    self.map.insert(id, b);
+                }
+                (before, after) => changes.push(Change { id, before, after }),
+            }
+        }
+        changes
+    }
 }
 
 impl<T: Keyed + Clone> Items<T> {
-    /// The item with this id, for editing; copies it first if a snapshot still shares it. Don't
-    /// change its id: the item stays filed under the old one, and `Board::validate` refuses that.
+    /// The item with this id, for editing; copies it first if a snapshot or the edit being
+    /// recorded still shares it. Don't change its id: the item stays filed under the old one, and
+    /// `Board::validate` refuses that.
     pub fn get_mut(&mut self, id: T::Id) -> Option<&mut T> {
+        if self.journal.is_some() {
+            let current = self.map.get(&id).cloned();
+            if current.is_some() {
+                self.record(id, &current);
+            }
+        }
         self.map.get_mut(&id).map(Arc::make_mut)
     }
 }
@@ -197,6 +299,121 @@ mod tests {
         fn id(&self) -> u32 {
             self.id
         }
+    }
+
+    fn things(ids: &[(u32, i32)]) -> Items<Thing> {
+        let mut a = Items::default();
+        for &(id, v) in ids {
+            a.insert(Thing { id, v }).expect("room");
+        }
+        a
+    }
+
+    #[test]
+    fn a_recording_lists_each_touched_item_once_with_its_first_value() {
+        let mut a = things(&[(1, 10), (2, 20), (3, 30)]);
+        a.begin();
+        if let Some(t) = a.get_mut(1) {
+            t.v = 11;
+        }
+        if let Some(t) = a.get_mut(1) {
+            t.v = 12; // second change: the value before the edit is still 10
+        }
+        a.remove(2);
+        a.insert(Thing { id: 4, v: 40 }).expect("room");
+        let _ = a.get_mut(3); // touched, unchanged: not a change
+        a.insert(Thing { id: 5, v: 50 }).expect("room");
+        a.remove(5); // added and removed again: not a change
+        let changes = a.finish();
+        let summary: Vec<_> = changes.iter().map(|c| (c.id, c.before.as_ref().map(|t| t.v), c.after.as_ref().map(|t| t.v))).collect();
+        assert_eq!(summary, [(1, Some(10), Some(12)), (2, Some(20), None), (4, None, Some(40))]);
+        let after = a.clone();
+        a.apply(&changes, false);
+        assert_eq!(a, things(&[(1, 10), (2, 20), (3, 30)]), "undone");
+        a.apply(&changes, true);
+        assert_eq!(a, after, "redone");
+    }
+
+    #[test]
+    fn overwriting_and_re_adding_an_id_keep_the_first_value() {
+        let mut a = things(&[(1, 10), (2, 20)]);
+        a.begin();
+        a.insert(Thing { id: 1, v: 11 }).expect("room"); // over an existing id
+        a.remove(2);
+        a.insert(Thing { id: 2, v: 22 }).expect("room"); // removed, then added again
+        a.remove(9); // not there: nothing to record
+        let changes = a.finish();
+        let summary: Vec<_> = changes.iter().map(|c| (c.id, c.before.as_ref().map(|t| t.v), c.after.as_ref().map(|t| t.v))).collect();
+        assert_eq!(summary, [(1, Some(10), Some(11)), (2, Some(20), Some(22))]);
+    }
+
+    #[test]
+    fn items_added_and_removed_in_one_edit_leave_nothing_in_the_record() {
+        let mut a = things(&[(1, 10)]);
+        a.begin();
+        for id in 100..10_100 {
+            a.insert(Thing { id, v: 0 }).expect("room");
+            a.remove(id);
+        }
+        assert_eq!(a.journal.as_ref().map(BTreeMap::len), Some(0), "the record doesn't grow with cancelled additions");
+        // An item there before the edit, changed and then removed: still recorded with its first
+        // value, so undo and rollback can bring it back.
+        if let Some(t) = a.get_mut(1) {
+            t.v = 11;
+        }
+        a.remove(1);
+        let changes = a.finish();
+        let summary: Vec<_> = changes.iter().map(|c| (c.id, c.before.as_ref().map(|t| t.v), c.after.as_ref().map(|t| t.v))).collect();
+        assert_eq!(summary, [(1, Some(10), None)]);
+        a.begin();
+        if let Some(t) = a.get_mut(100) {
+            t.v = 1; // not there: nothing happens
+        }
+        a.insert(Thing { id: 1, v: 12 }).expect("room");
+        if let Some(t) = a.get_mut(1) {
+            t.v = 13;
+        }
+        a.remove(1);
+        a.rollback();
+        assert!(a.is_empty(), "rolled back to the state at begin, without item 1");
+    }
+
+    #[test]
+    fn rollback_brings_back_an_item_changed_then_removed() {
+        let mut a = things(&[(1, 10)]);
+        a.begin();
+        if let Some(t) = a.get_mut(1) {
+            t.v = 11;
+        }
+        a.remove(1);
+        a.rollback();
+        assert_eq!(a, things(&[(1, 10)]));
+    }
+
+    #[test]
+    fn rollback_restores_everything_touched() {
+        let mut a = things(&[(1, 10), (2, 20)]);
+        a.begin();
+        if let Some(t) = a.get_mut(1) {
+            t.v = 99;
+        }
+        a.remove(2);
+        a.insert(Thing { id: 3, v: 30 }).expect("room");
+        a.rollback();
+        assert_eq!(a, things(&[(1, 10), (2, 20)]));
+        // No longer recording: later changes are not journalled.
+        a.insert(Thing { id: 4, v: 40 }).expect("room");
+        assert!(a.finish().is_empty());
+    }
+
+    #[test]
+    fn a_copy_does_not_carry_a_recording() {
+        let mut a = things(&[(1, 10)]);
+        a.begin();
+        a.remove(1);
+        let mut copy = a.clone();
+        assert!(copy.finish().is_empty());
+        assert_eq!(a.finish().len(), 1);
     }
 
     #[test]
