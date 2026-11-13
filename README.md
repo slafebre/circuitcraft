@@ -25,6 +25,7 @@ cargo run -p circuitcraft-cli -- commands              # every command, as JSON
 cargo run -p circuitcraft-cli -- exec board.info       # run one command
 cargo run -p circuitcraft-cli -- info design.brd       # recognise an EAGLE or KiCad file
 cargo xtask ci                                         # fmt, clippy, tests, assets, layers, wasm
+cargo xtask bundle                                     # macOS: dist/CircuitCraft.app, for this machine
 ```
 
 The browser build: `cd apps/circuitcraft-web && trunk serve` (needs [trunk](https://github.com/trunk-rs/trunk)).

@@ -108,6 +108,7 @@ cargo run -p circuitcraft-cli -- commands                       # every command,
 cargo run -p circuitcraft-cli -- exec board.info                # run one command
 cargo run -p circuitcraft-cli -- info path/to/board.kicad_pcb   # what kind of file is this?
 cargo run -p circuitcraft-cli -- mcp                            # MCP server on stdio
+cargo xtask bundle                                              # macOS: dist/CircuitCraft.app, for this machine
 cd apps/circuitcraft-web && trunk serve                         # browser build (needs trunk)
 ```
 
