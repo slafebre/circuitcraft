@@ -9,7 +9,7 @@ mod commands;
 
 pub use commands::COMMANDS;
 
-use circuitcraft_model::Board;
+use circuitcraft_model::{Board, Document, ModelError};
 use serde_json::Value;
 
 /// Why a command did not run or did not finish.
@@ -27,6 +27,13 @@ pub enum EngineError {
     /// The command panicked; the design was restored to how it was before the command.
     #[error("internal error in `{0}`; the design was restored")]
     Panicked(String),
+}
+
+impl From<ModelError> for EngineError {
+    /// A refused model edit means the request was wrong (bad size, unknown net, …).
+    fn from(e: ModelError) -> Self {
+        EngineError::BadParams(e.to_string())
+    }
 }
 
 /// A command's JSON entry point.
@@ -57,8 +64,8 @@ pub fn command(id: &str) -> Option<&'static CommandSpec> {
 /// One open design and everything needed to run commands on it.
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// The board being edited.
-    pub board: Board,
+    /// The open board and its undo history.
+    doc: Document,
 }
 
 impl Default for Session {
@@ -70,7 +77,17 @@ impl Default for Session {
 impl Session {
     /// A session with a new, empty board.
     pub fn new() -> Session {
-        Session { board: Board::new("Untitled") }
+        Session { doc: Document::new(Board::new("Untitled")) }
+    }
+
+    /// The board being edited.
+    pub fn board(&self) -> &Board {
+        self.doc.board()
+    }
+
+    /// The open document, with its undo history.
+    pub fn doc(&self) -> &Document {
+        &self.doc
     }
 
     /// Runs a command with JSON parameters (`{}` or `null` for the defaults). Programmatic calls
@@ -81,7 +98,7 @@ impl Session {
     /// commands must not rely on this guard.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value, EngineError> {
         let spec = command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_owned()))?;
-        let before = self.board.clone();
+        let before = self.doc.checkpoint();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, params)));
         match outcome {
             Ok(result) => {
@@ -91,7 +108,7 @@ impl Session {
                 result
             }
             Err(_) => {
-                self.board = before;
+                self.doc.restore(before);
                 log::error!("command `{id}` panicked; the design was restored");
                 Err(EngineError::Panicked(id.to_owned()))
             }
