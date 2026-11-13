@@ -12,6 +12,7 @@ use crate::ModelError;
 use serde::de::{DeserializeSeed, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -86,6 +87,8 @@ pub struct Change<T: Keyed> {
 pub struct Items<T: Keyed> {
     map: BTreeMap<T::Id, Arc<T>>,
     /// Values from before the edit being recorded, by id; `None` when nothing is being recorded.
+    /// An entry holding `None` (added by this edit) exists only while its item does, so the record
+    /// holds at most the items there at the start plus the current ones.
     journal: Option<BTreeMap<T::Id, Option<Arc<T>>>>,
 }
 
@@ -151,8 +154,18 @@ impl<T: Keyed> Items<T> {
     /// Removes and returns the item with this id.
     pub fn remove(&mut self, id: T::Id) -> Option<Arc<T>> {
         let old = self.map.remove(&id);
-        if old.is_some() {
-            self.record(id, &old);
+        if let (Some(_), Some(journal)) = (&old, &mut self.journal) {
+            match journal.entry(id) {
+                // Added by this edit: removing it cancels the addition, so the record keeps
+                // nothing for it.
+                Entry::Occupied(e) if e.get().is_none() => {
+                    e.remove();
+                }
+                Entry::Occupied(_) => {}
+                Entry::Vacant(e) => {
+                    e.insert(old.clone());
+                }
+            }
         }
         old
     }
@@ -209,6 +222,7 @@ impl<T: Keyed + PartialEq> Items<T> {
         for (id, before) in self.journal.take().unwrap_or_default() {
             let after = self.map.get(&id).cloned();
             match (before, after) {
+                // Defensive: `remove` drops the entry of an item added and removed by the edit.
                 (None, None) => {}
                 (Some(b), Some(a)) if b == a => {
                     self.map.insert(id, b);
@@ -331,6 +345,49 @@ mod tests {
         let changes = a.finish();
         let summary: Vec<_> = changes.iter().map(|c| (c.id, c.before.as_ref().map(|t| t.v), c.after.as_ref().map(|t| t.v))).collect();
         assert_eq!(summary, [(1, Some(10), Some(11)), (2, Some(20), Some(22))]);
+    }
+
+    #[test]
+    fn items_added_and_removed_in_one_edit_leave_nothing_in_the_record() {
+        let mut a = things(&[(1, 10)]);
+        a.begin();
+        for id in 100..10_100 {
+            a.insert(Thing { id, v: 0 }).expect("room");
+            a.remove(id);
+        }
+        assert_eq!(a.journal.as_ref().map(BTreeMap::len), Some(0), "the record doesn't grow with cancelled additions");
+        // An item there before the edit, changed and then removed: still recorded with its first
+        // value, so undo and rollback can bring it back.
+        if let Some(t) = a.get_mut(1) {
+            t.v = 11;
+        }
+        a.remove(1);
+        let changes = a.finish();
+        let summary: Vec<_> = changes.iter().map(|c| (c.id, c.before.as_ref().map(|t| t.v), c.after.as_ref().map(|t| t.v))).collect();
+        assert_eq!(summary, [(1, Some(10), None)]);
+        a.begin();
+        if let Some(t) = a.get_mut(100) {
+            t.v = 1; // not there: nothing happens
+        }
+        a.insert(Thing { id: 1, v: 12 }).expect("room");
+        if let Some(t) = a.get_mut(1) {
+            t.v = 13;
+        }
+        a.remove(1);
+        a.rollback();
+        assert!(a.is_empty(), "rolled back to the state at begin, without item 1");
+    }
+
+    #[test]
+    fn rollback_brings_back_an_item_changed_then_removed() {
+        let mut a = things(&[(1, 10)]);
+        a.begin();
+        if let Some(t) = a.get_mut(1) {
+            t.v = 11;
+        }
+        a.remove(1);
+        a.rollback();
+        assert_eq!(a, things(&[(1, 10)]));
     }
 
     #[test]
