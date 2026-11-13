@@ -116,7 +116,7 @@ pub struct Net {
     pub name: String,
 }
 
-/// The copper shape of a pad.
+/// The copper shape of a pad, placed on the pad's copper centre ([`Pad::copper_offset`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PadShape {
@@ -125,7 +125,7 @@ pub enum PadShape {
         /// Diameter.
         diameter: Nm,
     },
-    /// A rectangle centred on the pad position.
+    /// A rectangle.
     Rect {
         /// Width (x before rotation).
         width: Nm,
@@ -148,50 +148,139 @@ pub enum PadShape {
         /// Height.
         height: Nm,
     },
-    /// Any outline, relative to the pad position.
+    /// Any outline, relative to the copper centre.
     Custom {
         /// The outline.
         outline: Contour,
     },
 }
 
-/// A drilled hole.
+/// The opening over a pad or via in the solder mask, or the aperture for a pad in the paste
+/// stencil.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Opening {
+    /// The board's design rules decide whether there is an opening, and how large.
+    #[default]
+    Rules,
+    /// An opening in the shape of the copper, grown on every side.
+    Open {
+        /// How much larger than the copper the opening is; smaller when negative, and an opening
+        /// shrunk to nothing is no opening. `None` takes the amount from the design rules.
+        by: Option<Nm>,
+    },
+    /// No opening: the solder mask covers the copper (a tented via), or the stencil has no
+    /// aperture.
+    Closed,
+}
+
+/// What makes a hole a slot: a round hole stretched along one axis, with round ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Drill {
-    /// Hole diameter.
+pub struct Slot {
+    /// Overall length, end to end; longer than the hole's diameter.
+    pub length: Nm,
+    /// Direction of the long axis, relative to the pad (zero is along the pad's x axis). Below
+    /// half a turn, since a slot looks the same turned around.
+    pub rotation: Rotation,
+}
+
+/// A hole through the board: round, or a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Hole {
+    /// The diameter of a round hole, or the width of a slot.
     pub diameter: Nm,
+    /// Makes the hole a slot; `None` for a round hole.
+    pub slot: Option<Slot>,
     /// Whether the hole is plated (connects copper layers).
     pub plated: bool,
 }
 
-/// Which layers a pad is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PadKind {
-    /// A surface-mount pad on the outer copper layer of its footprint's side.
-    Smd,
-    /// A pad on every copper layer around a drilled hole.
-    ThroughHole {
-        /// The hole.
-        drill: Drill,
-    },
+impl Hole {
+    /// A round hole.
+    pub fn round(diameter: Nm, plated: bool) -> Hole {
+        Hole { diameter, slot: None, plated }
+    }
+}
+
+/// What a pad has on one outer side of the board.
+///
+/// The mask and paste openings belong to the copper. An opening without copper under it (a paste
+/// aperture that is one of several over a large pad, say) is a footprint drawing on the mask or
+/// paste layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadFace {
+    /// Copper shape.
+    pub shape: PadShape,
+    /// Solder mask opening over the copper.
+    pub mask: Opening,
+    /// Paste stencil aperture over the copper.
+    pub paste: Opening,
 }
 
 /// One pad of a footprint, in footprint coordinates.
+///
+/// A pad has copper or a hole, or both. A surface-mount pad has only a `front`; a through-hole
+/// pad has copper on every layer around a plated hole; a mounting hole can be a hole alone. On a
+/// side where a hole has no copper, the design rules decide the solder mask opening around it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pad {
-    /// The pad number or name, matching a symbol pin (`1`, `A3`, `EP`).
+    /// The pad number or name, matching a symbol pin (`1`, `A3`, `EP`). Empty for a pad that
+    /// belongs to no pin, such as a mounting hole.
     pub number: String,
-    /// Centre, relative to the footprint origin.
+    /// Where the pad is, relative to the footprint origin: the centre of its hole, or of its
+    /// copper when it has no hole.
     pub position: Point,
     /// Rotation relative to the footprint.
     pub rotation: Rotation,
-    /// Copper shape.
-    pub shape: PadShape,
-    /// SMD or through-hole.
-    pub kind: PadKind,
+    /// The centre of the copper shapes relative to `position`, before the pad's rotation. Zero
+    /// unless the copper sits off centre around the hole.
+    pub copper_offset: Point,
+    /// Copper, mask and paste on the outer layer of the footprint's own side.
+    pub front: Option<PadFace>,
+    /// Copper on the inner copper layers; they all share one shape.
+    pub inner: Option<PadShape>,
+    /// Copper, mask and paste on the outer layer of the opposite side.
+    pub back: Option<PadFace>,
+    /// The hole through the board.
+    pub hole: Option<Hole>,
     /// The net it connects to.
     pub net: Option<NetId>,
+}
+
+impl Pad {
+    /// A surface-mount pad without a net: copper on the footprint's own side only, with mask and
+    /// paste openings from the design rules.
+    pub fn smd(number: &str, position: Point, shape: PadShape) -> Pad {
+        let front = PadFace { shape, mask: Opening::Rules, paste: Opening::Rules };
+        Pad { front: Some(front), ..Pad::bare(number, position) }
+    }
+
+    /// A through-hole pad without a net: the same copper shape on every layer, centred on `hole`,
+    /// with mask openings from the design rules and no paste.
+    pub fn through_hole(number: &str, position: Point, shape: PadShape, hole: Hole) -> Pad {
+        let face = PadFace { shape: shape.clone(), mask: Opening::Rules, paste: Opening::Closed };
+        Pad { front: Some(face.clone()), inner: Some(shape), back: Some(face), hole: Some(hole), ..Pad::bare(number, position) }
+    }
+
+    /// A hole alone, such as a mounting hole: no copper, no number and no net.
+    pub fn bare_hole(position: Point, hole: Hole) -> Pad {
+        Pad { hole: Some(hole), ..Pad::bare("", position) }
+    }
+
+    /// A pad with nothing on it yet, for the constructors to fill in.
+    fn bare(number: &str, position: Point) -> Pad {
+        Pad {
+            number: number.to_owned(),
+            position,
+            rotation: Rotation(0),
+            copper_offset: Point::ORIGIN,
+            front: None,
+            inner: None,
+            back: None,
+            hole: None,
+            net: None,
+        }
+    }
 }
 
 /// A line, arc or circle drawn on a layer (silkscreen, outline, documentation).
@@ -275,7 +364,7 @@ pub struct Text {
     pub justify: Justify,
 }
 
-/// A placed component's copper pads and drawings.
+/// A placed component's pads and drawings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footprint {
     /// Identity, shared with the schematic symbol once schematics exist.
@@ -371,6 +460,11 @@ pub struct Via {
     pub from: LayerId,
     /// Bottommost copper layer it connects.
     pub to: LayerId,
+    /// Solder mask over the via on the top side of the board ([`Opening::Closed`] tents it). It
+    /// matters only for a via that reaches that side.
+    pub top_mask: Opening,
+    /// Solder mask over the via on the bottom side of the board.
+    pub bottom_mask: Opening,
     /// The net it carries.
     pub net: Option<NetId>,
 }
