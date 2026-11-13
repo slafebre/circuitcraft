@@ -5,11 +5,11 @@
 //! order, which also gives saved files a stable order.
 //!
 //! Collections are bounded. Decoding refuses a list longer than its limit as it is read: the
-//! element past the limit is skipped without being decoded, so it allocates nothing.
+//! element past the limit is refused before any of it is read, so it allocates nothing.
 //! [`Items::insert`] refuses to grow a collection past [`MAX_ITEMS`].
 
 use crate::ModelError;
-use serde::de::{Error as _, IgnoredAny, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -44,12 +44,17 @@ pub(crate) fn bounded_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D, 
     d.deserialize_seq(Bounded(max, PhantomData))
 }
 
-/// At the limit: fails if the list goes on. The next element is skipped, never decoded.
+/// At the limit: fails if the list goes on. The next element is refused before any of it is read
+/// (even skipping it would walk its contents, which in a hostile file may be nested without end).
 fn refuse_more<'de, A: SeqAccess<'de>>(seq: &mut A, max: usize) -> Result<(), A::Error> {
-    match seq.next_element::<IgnoredAny>()? {
-        Some(_) => Err(A::Error::custom(format!("more than {max} elements"))),
-        None => Ok(()),
+    struct Refuse(usize);
+    impl<'de> DeserializeSeed<'de> for Refuse {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
+            Err(D::Error::custom(format!("more than {} elements", self.0)))
+        }
     }
+    seq.next_element_seed(Refuse(max)).map(|_| ())
 }
 
 /// Something stored in an [`Items`] collection: it knows its own id.
@@ -226,8 +231,9 @@ mod tests {
         let items = (0..MAX_ITEMS).map(|i| format!(r#"{{"id":{i},"v":0}}"#)).collect::<Vec<_>>().join(",");
         let at_limit: Items<Thing> = serde_json::from_str(&format!("[{items}]")).expect("at the limit");
         assert_eq!(at_limit.len(), MAX_ITEMS);
-        // The extra element isn't even a Thing: it is refused for being one too many, unread.
-        let err = serde_json::from_str::<Items<Thing>>(&format!(r#"[{items},"not a thing"]"#)).err().map(|e| e.to_string());
+        // The extra element is deeply nested and unfinished: it is refused for being one too many,
+        // before any of it is read.
+        let err = serde_json::from_str::<Items<Thing>>(&format!("[{items},{}", "[".repeat(100_000))).err().map(|e| e.to_string());
         assert!(err.is_some_and(|e| e.contains("more than")), "refused by count, not by decoding the extra element");
     }
 
@@ -247,7 +253,8 @@ mod tests {
     fn bounded_vec_refuses_long_lists() {
         let mut de = serde_json::Deserializer::from_str("[1,2,3]");
         assert_eq!(bounded_vec::<_, i32>(&mut de, 3).ok(), Some(vec![1, 2, 3]));
-        let mut de = serde_json::Deserializer::from_str(r#"[1,2,3,"four"]"#);
+        let json = format!("[1,2,3,{}", "[".repeat(100_000));
+        let mut de = serde_json::Deserializer::from_str(&json);
         let err = bounded_vec::<_, i32>(&mut de, 3).err().map(|e| e.to_string());
         assert!(err.is_some_and(|e| e.contains("more than 3")), "refused by count, not by decoding the extra element");
     }
