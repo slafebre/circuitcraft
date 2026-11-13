@@ -1,0 +1,23 @@
+# Weekly dependency updates, each as its own pull request through CI. Security updates are
+# switched on in the repository settings and arrive as soon as an advisory is published.
+# A Cargo update that brings in a new licence fails `cargo xtask licenses` until it is decided.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # egui, eframe and their family move together; one PR instead of several broken ones.
+      egui:
+        patterns:
+          - "egui*"
+          - "eframe"
+          - "epaint*"
+          - "emath"
+          - "ecolor"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
