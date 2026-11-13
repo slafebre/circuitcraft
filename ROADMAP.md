@@ -47,7 +47,7 @@ Proves the workspace, the data model, the renderer and the agent interface on re
 |---|---|
 | ✅ Workspace scaffold: crate layers, `cargo xtask ci` (fmt, clippy with deny lints, tests, layers, assets, wasm), licences, `AGENTS.md` with the house rules, `ATTRIBUTION.md`, command registry, CLI (`commands`, `exec`, `info`, `mcp`), MCP server, empty desktop and web shells | S |
 | ✅ `units` and `geom`: `i64` nanometre coordinates, lines, arcs, polygons with arcs, booleans, offsets and track strokes (on `i_overlay`) | M |
-| `model` v0: board outline, layer stack, pads, tracks, arcs, vias, copper polygons, text, footprints, nets; copy-on-write store with undo | M |
+| ✅ `model` v0: board outline, layer stack, pads, tracks, arcs, vias, copper polygons, text, footprints, nets; copy-on-write store with undo | M |
 | Native format v0: read and write, deterministic, with a version field | S |
 | EAGLE `.brd` and KiCad board import, read-only | M |
 | Renderer: layered 2D GPU view, layer visibility and colours, single-layer mode, net highlight, pan and zoom | M |
@@ -134,6 +134,7 @@ panelization, our own simulator behind the simulator interface.
 | Decision | Options or notes | Needed by |
 |---|---|---|
 | Reference boards | Candidates: a 2-layer microcontroller board; a 4-layer ESP32 board with USB-C; a board with a USB high-speed differential pair. Prefer open designs so the community can rebuild them | 0.3 |
+| Item ids across branches | Ids are a per-board counter (`next_id`), which keeps files small and stable but lets two branches hand out the same id for different items, so a git merge of two edited boards can collide. Options: random 128-bit ids, or ids made of an author or branch prefix plus a counter | native format v0 (0.1) |
 | KiCad library content | CC-BY-SA-4.0 with an exception: check against the licence allowlist before importing it as bundled content | 0.5 |
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
@@ -183,3 +184,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-13 | egui licence exceptions accepted; licence check added to CI |
 | 2026-11-13 | 0.1 decisions settled: name, polygon library, EAGLE reader terms, test corpus, native format, DCO sign-off |
 | 2026-11-13 | Geometry landed: arcs, contours, polygon booleans, offsets and track strokes |
+| 2026-11-13 | Board model v0 landed: nets, footprints and pads, tracks, vias, zones, text and drawings in copy-on-write collections, with validation and undo/redo |

@@ -645,6 +645,7 @@ version = "0.0.1"
 dependencies = [
  "circuitcraft-io",
  "circuitcraft-model",
+ "circuitcraft-units",
  "log",
  "serde",
  "serde_json",
@@ -685,6 +686,8 @@ dependencies = [
  "circuitcraft-geom",
  "circuitcraft-units",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

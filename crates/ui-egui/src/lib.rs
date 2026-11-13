@@ -51,9 +51,12 @@ impl CircuitApp {
     pub fn run(&mut self, id: &str, params: &Value) {
         match self.session.execute(id, params) {
             Ok(v) => {
-                self.status = format!("{id}: done");
-                if !matches!(id, "board.new") {
-                    let label = circuitcraft_engine::command(id).map_or(id, |c| c.label);
+                let spec = circuitcraft_engine::command(id);
+                let label = spec.map_or(id, |c| c.label);
+                self.status = format!("{label}: done");
+                // Reports and Help produce something to read; edits only update the board.
+                let shows_result = spec.and_then(|c| c.menu).is_some_and(|m| m.starts_with("Reports/") || m.starts_with("Help/"));
+                if shows_result {
                     let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                     self.result = Some((label.to_owned(), text));
                 }
@@ -102,7 +105,7 @@ impl CircuitApp {
     }
 
     fn layer_tabs(&mut self, ui: &mut egui::Ui) {
-        let stack = &self.session.board.stack;
+        let stack = &self.session.board().stack;
         let mut copper_index = 0;
         let mut chosen = None;
         egui::Panel::bottom("cc_layer_tabs").frame(egui::Frame::NONE.fill(theme::CHROME_DARK).inner_margin(4)).show(ui, |ui| {
@@ -129,17 +132,17 @@ impl CircuitApp {
         egui::Panel::left("cc_projects").default_size(200.0).frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(8)).show(ui, |ui| {
             ui.strong("Projects");
             ui.separator();
-            ui.label(format!("▸ {}", self.session.board.name));
+            ui.label(format!("▸ {}", self.session.board().name));
             ui.label(RichText::new("Schematics arrive in 0.3").color(theme::TEXT_DIM));
         });
     }
 
     fn properties_panel(&self, ui: &mut egui::Ui) {
-        let stack = &self.session.board.stack;
+        let stack = &self.session.board().stack;
         egui::Panel::right("cc_properties").default_size(240.0).frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(8)).show(ui, |ui| {
             ui.strong("Properties");
             ui.separator();
-            ui.label(format!("Board: {}", self.session.board.name));
+            ui.label(format!("Board: {}", self.session.board().name));
             ui.label(format!("Copper layers: {}", stack.copper_count()));
             ui.label(format!("Thickness: {:.3} mm", stack.thickness().to_mm()));
             if let Some(layer) = stack.layers.get(self.active_layer) {
@@ -231,7 +234,7 @@ mod tests {
     fn running_a_command_updates_status() {
         let mut app = CircuitApp::default();
         app.run("board.new", &serde_json::json!({"name": "Blinky"}));
-        assert_eq!(app.session().board.name, "Blinky");
+        assert_eq!(app.session().board().name, "Blinky");
         app.run("nope", &Value::Null);
         assert!(app.status.contains("unknown command"));
     }
