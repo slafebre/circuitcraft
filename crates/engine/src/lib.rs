@@ -65,7 +65,7 @@ pub fn command(id: &str) -> Option<&'static CommandSpec> {
 }
 
 /// One open design and everything needed to run commands on it.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
     /// The open board and its undo history.
     doc: Document,
@@ -118,24 +118,26 @@ impl Session {
     /// Runs a command with JSON parameters (`{}` or `null` for the defaults). Programmatic calls
     /// never open dialogs.
     ///
-    /// Last-resort guard: a command that panics is caught, the whole session (board, history and
-    /// save targets, kept together so a target can't outlive its board) is restored to how it was
-    /// before the command, and [`EngineError::Panicked`] is returned. Cloning a session is cheap:
-    /// boards share their items and the history shares its steps. On wasm a panic aborts, so
-    /// commands must not rely on this guard.
+    /// Last-resort guard: a command that panics is caught, the board and its history are restored
+    /// to how they were before the command, and [`EngineError::Panicked`] is returned. The
+    /// document's guard reverses what the command changed instead of copying the board. Save
+    /// targets are left alone: they are keyed by generations, which are never reused, so a target
+    /// a failed command recorded belongs to no board (it is pruned later) or points at files that
+    /// really were written. On wasm a panic aborts, so commands must not rely on this guard.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value, EngineError> {
         let spec = command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_owned()))?;
-        let before = self.clone();
+        self.doc.open_guard();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, params)));
         match outcome {
             Ok(result) => {
+                self.doc.close_guard();
                 if let Err(e) = &result {
                     log::debug!("command `{id}` failed: {e}");
                 }
                 result
             }
             Err(_) => {
-                *self = before;
+                self.doc.rollback_guard();
                 log::error!("command `{id}` panicked; the design was restored");
                 Err(EngineError::Panicked(id.to_owned()))
             }
