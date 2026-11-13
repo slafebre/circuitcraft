@@ -94,7 +94,8 @@ fn cutouts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Contour>, D::Er
     store::bounded_vec(d, MAX_ITEMS)
 }
 
-/// Refuses to add to a collection that is already at [`MAX_ITEMS`].
+/// Refuses to add to a collection that is already at [`MAX_ITEMS`], before an id is spent and with
+/// a message that names the collection ([`Items::insert`] enforces the same limit).
 fn room<T: Keyed>(items: &Items<T>, what: &'static str) -> Result<(), ModelError> {
     if items.len() >= MAX_ITEMS { Err(ModelError::TooMany(what)) } else { Ok(()) }
 }
@@ -138,7 +139,7 @@ impl Board {
             return Err(ModelError::BadName(name.to_owned(), "a net with this name exists"));
         }
         let id = NetId(self.fresh_id()?);
-        self.nets.insert(Net { id, name: name.to_owned() });
+        self.nets.insert(Net { id, name: name.to_owned() })?;
         Ok(id)
     }
 
@@ -148,7 +149,7 @@ impl Board {
         let id = ItemId(self.fresh_id()?);
         let track = Track { id, layer, width, path, net };
         self.check_track(&track)?;
-        self.tracks.insert(track);
+        self.tracks.insert(track)?;
         Ok(id)
     }
 
@@ -161,7 +162,7 @@ impl Board {
         let id = ItemId(self.fresh_id()?);
         let via = Via { id, position, diameter, drill, from, to, net };
         self.check_via(&via)?;
-        self.vias.insert(via);
+        self.vias.insert(via)?;
         Ok(id)
     }
 
@@ -550,6 +551,14 @@ mod tests {
         }
         assert!(b.tracks.get(ItemId(50)).is_none(), "still filed under the old id");
         assert_eq!(b.validate(), Err(ModelError::BadId(t.0)));
+        // A save and reload files it under its new id, which then validates.
+        let back: Board = serde_json::from_str(&serde_json::to_string(&b).expect("json")).expect("parse");
+        assert!(back.tracks.get(ItemId(50)).is_some() && back.tracks.get(t).is_none());
+        assert_eq!(back.validate(), Ok(()));
+        // Removal goes by the key it is filed under, not the changed id.
+        assert_eq!(b.remove(50), Err(ModelError::UnknownItem(50)));
+        assert_eq!(b.remove(t.0), Ok(()));
+        assert_eq!(b.validate(), Ok(()));
     }
 
     #[test]

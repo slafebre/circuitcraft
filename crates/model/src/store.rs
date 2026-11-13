@@ -4,10 +4,12 @@
 //! not items, and editing one item copies only that item ([`Arc::make_mut`]). Items are kept in id
 //! order, which also gives saved files a stable order.
 //!
-//! Decoding is bounded: a collection longer than its limit is refused as it is read, before the
-//! excess is allocated, so a hostile file cannot exhaust memory.
+//! Collections are bounded. Decoding refuses a list longer than its limit as it is read: the
+//! element past the limit is skipped without being decoded, so it allocates nothing.
+//! [`Items::insert`] refuses to grow a collection past [`MAX_ITEMS`].
 
-use serde::de::{Error as _, SeqAccess, Visitor};
+use crate::ModelError;
+use serde::de::{Error as _, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -29,16 +31,25 @@ pub(crate) fn bounded_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D, 
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
             // The size hint comes from the input, so it only ever caps the first allocation.
             let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.0).min(4_096));
-            while let Some(v) = seq.next_element()? {
-                if out.len() >= self.0 {
-                    return Err(A::Error::custom(format!("more than {} elements", self.0)));
+            while out.len() < self.0 {
+                match seq.next_element()? {
+                    Some(v) => out.push(v),
+                    None => return Ok(out),
                 }
-                out.push(v);
             }
+            refuse_more(&mut seq, self.0)?;
             Ok(out)
         }
     }
     d.deserialize_seq(Bounded(max, PhantomData))
+}
+
+/// At the limit: fails if the list goes on. The next element is skipped, never decoded.
+fn refuse_more<'de, A: SeqAccess<'de>>(seq: &mut A, max: usize) -> Result<(), A::Error> {
+    match seq.next_element::<IgnoredAny>()? {
+        Some(_) => Err(A::Error::custom(format!("more than {max} elements"))),
+        None => Ok(()),
+    }
 }
 
 /// Something stored in an [`Items`] collection: it knows its own id.
@@ -101,9 +112,14 @@ impl<T: Keyed> Items<T> {
         self.map.values().map(Arc::as_ref)
     }
 
-    /// Adds an item; returns the one it replaced, if its id was taken.
-    pub fn insert(&mut self, item: T) -> Option<Arc<T>> {
-        self.map.insert(item.id(), Arc::new(item))
+    /// Adds an item; returns the one it replaced, if its id was taken. Refuses a new id when the
+    /// collection already holds [`MAX_ITEMS`] (replacing an item is always allowed).
+    pub fn insert(&mut self, item: T) -> Result<Option<Arc<T>>, ModelError> {
+        let id = item.id();
+        if self.map.len() >= MAX_ITEMS && !self.map.contains_key(&id) {
+            return Err(ModelError::TooMany("items"));
+        }
+        Ok(self.map.insert(id, Arc::new(item)))
     }
 
     /// Removes and returns the item with this id.
@@ -144,15 +160,16 @@ impl<'de, T: Keyed + Deserialize<'de>> Deserialize<'de> for Items<T> {
             }
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Items<T>, A::Error> {
                 let mut items = Items::default();
-                while let Some(item) = seq.next_element::<T>()? {
-                    if items.len() >= MAX_ITEMS {
-                        return Err(A::Error::custom(format!("more than {MAX_ITEMS} items")));
-                    }
+                while items.len() < MAX_ITEMS {
+                    let Some(item) = seq.next_element::<T>()? else {
+                        return Ok(items);
+                    };
                     let id = item.id();
-                    if items.insert(item).is_some() {
+                    if items.map.insert(id, Arc::new(item)).is_some() {
                         return Err(A::Error::custom(format!("duplicate id {id:?}")));
                     }
                 }
+                refuse_more(&mut seq, MAX_ITEMS)?;
                 Ok(items)
             }
         }
@@ -180,8 +197,8 @@ mod tests {
     #[test]
     fn copy_on_write_keeps_snapshots_intact() {
         let mut a: Items<Thing> = Items::default();
-        a.insert(Thing { id: 2, v: 20 });
-        a.insert(Thing { id: 1, v: 10 });
+        a.insert(Thing { id: 2, v: 20 }).expect("room");
+        a.insert(Thing { id: 1, v: 10 }).expect("room");
         let snapshot = a.clone();
         if let Some(t) = a.get_mut(1) {
             t.v = 11;
@@ -195,8 +212,8 @@ mod tests {
     #[test]
     fn serializes_in_id_order_and_rejects_duplicates() {
         let mut a: Items<Thing> = Items::default();
-        a.insert(Thing { id: 2, v: 20 });
-        a.insert(Thing { id: 1, v: 10 });
+        a.insert(Thing { id: 2, v: 20 }).expect("room");
+        a.insert(Thing { id: 1, v: 10 }).expect("room");
         let json = serde_json::to_string(&a).expect("json");
         assert_eq!(json, r#"[{"id":1,"v":10},{"id":2,"v":20}]"#);
         let back: Items<Thing> = serde_json::from_str(&json).expect("parse");
@@ -206,24 +223,39 @@ mod tests {
 
     #[test]
     fn decoding_stops_at_the_item_limit() {
-        let list = |n: usize| format!("[{}]", (0..n).map(|i| format!(r#"{{"id":{i},"v":0}}"#)).collect::<Vec<_>>().join(","));
-        let at_limit: Items<Thing> = serde_json::from_str(&list(MAX_ITEMS)).expect("at the limit");
+        let items = (0..MAX_ITEMS).map(|i| format!(r#"{{"id":{i},"v":0}}"#)).collect::<Vec<_>>().join(",");
+        let at_limit: Items<Thing> = serde_json::from_str(&format!("[{items}]")).expect("at the limit");
         assert_eq!(at_limit.len(), MAX_ITEMS);
-        assert!(serde_json::from_str::<Items<Thing>>(&list(MAX_ITEMS + 1)).is_err());
+        // The extra element isn't even a Thing: it is refused for being one too many, unread.
+        let err = serde_json::from_str::<Items<Thing>>(&format!(r#"[{items},"not a thing"]"#)).err().map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains("more than")), "refused by count, not by decoding the extra element");
+    }
+
+    #[test]
+    fn insert_stops_at_the_item_limit() {
+        let mut a: Items<Thing> = Items::default();
+        for id in 0..MAX_ITEMS as u32 {
+            a.insert(Thing { id, v: 0 }).expect("room");
+        }
+        assert_eq!(a.insert(Thing { id: u32::MAX, v: 0 }), Err(ModelError::TooMany("items")));
+        assert_eq!(a.len(), MAX_ITEMS);
+        // Replacing an item doesn't grow the collection, so it is still allowed.
+        assert!(a.insert(Thing { id: 0, v: 1 }).is_ok_and(|old| old.is_some()));
     }
 
     #[test]
     fn bounded_vec_refuses_long_lists() {
         let mut de = serde_json::Deserializer::from_str("[1,2,3]");
         assert_eq!(bounded_vec::<_, i32>(&mut de, 3).ok(), Some(vec![1, 2, 3]));
-        let mut de = serde_json::Deserializer::from_str("[1,2,3,4]");
-        assert!(bounded_vec::<_, i32>(&mut de, 3).is_err());
+        let mut de = serde_json::Deserializer::from_str(r#"[1,2,3,"four"]"#);
+        let err = bounded_vec::<_, i32>(&mut de, 3).err().map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains("more than 3")), "refused by count, not by decoding the extra element");
     }
 
     #[test]
     fn a_changed_id_is_reported() {
         let mut a: Items<Thing> = Items::default();
-        a.insert(Thing { id: 1, v: 10 });
+        a.insert(Thing { id: 1, v: 10 }).expect("room");
         assert_eq!(a.mismatched_key(), None);
         if let Some(t) = a.get_mut(1) {
             t.id = 7;
