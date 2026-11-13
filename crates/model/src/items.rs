@@ -3,21 +3,80 @@
 //! Coordinates are board coordinates in [`Nm`], y up, except pads and footprint drawings, which
 //! are relative to their footprint's origin before its rotation and side are applied.
 
-use crate::LayerId;
 use crate::store::Keyed;
+use crate::{LayerId, ModelError};
 use circuitcraft_geom::{Arc, Contour};
 use circuitcraft_units::{Nm, Point};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+use uuid::Uuid;
 
-/// The identity of a board item, stable for its life and unique within the board.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ItemId(pub u64);
+/// 128 fresh random bits as a version 4 UUID; an error, never a panic, if the system has none.
+fn random_uuid() -> Result<Uuid, ModelError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| ModelError::NoRandomness(e.to_string()))?;
+    Ok(uuid::Builder::from_random_bytes(bytes).into_uuid())
+}
 
-/// The identity of a net.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NetId(pub u64);
+macro_rules! id_type {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        ///
+        /// Ids are random version 4 UUIDs, so items added on two git branches never share one, and
+        /// files write them in the usual form (`3f2c9a10-6b7e-4d21-9a0c-58e1f4b2d7a3`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+
+        impl $name {
+            /// A new random id.
+            pub fn random() -> Result<$name, ModelError> {
+                random_uuid().map($name)
+            }
+
+            /// The id with these 128 bits, for tests and for importers that derive ids from
+            /// their source file.
+            pub const fn from_u128(bits: u128) -> $name {
+                $name(Uuid::from_u128(bits))
+            }
+
+            /// The id's 128 bits.
+            pub const fn as_u128(self) -> u128 {
+                self.0.as_u128()
+            }
+
+            /// Whether this is the all-zero id, which no item may have.
+            pub const fn is_nil(self) -> bool {
+                self.0.is_nil()
+            }
+        }
+
+        impl fmt::Display for $name {
+            /// The usual lower-case, hyphenated UUID form.
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                self.0.as_hyphenated().fmt(f)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = ModelError;
+            fn from_str(s: &str) -> Result<$name, ModelError> {
+                Uuid::try_parse(s).map($name).map_err(|_| ModelError::BadId(s.chars().take(64).collect()))
+            }
+        }
+    };
+}
+
+id_type!(
+    /// The identity of a board item, stable for its life and unique within the board.
+    ItemId
+);
+
+id_type!(
+    /// The identity of a net, unique within the board.
+    NetId
+);
 
 /// A rotation in thousandths of a degree, counter-clockwise, kept in `0..360_000`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -349,6 +408,30 @@ keyed!(Net => NetId, Footprint => ItemId, Track => ItemId, Via => ItemId, Zone =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_ids_are_distinct_v4_uuids() {
+        let a = ItemId::random().expect("random");
+        let b = ItemId::random().expect("random");
+        assert_ne!(a, b);
+        assert!(!a.is_nil());
+        let text = a.to_string();
+        assert_eq!(text.len(), 36);
+        assert_eq!(text.chars().nth(14), Some('4'), "version 4");
+        assert_eq!(text.parse::<ItemId>(), Ok(a));
+    }
+
+    #[test]
+    fn ids_are_written_as_hyphenated_strings() {
+        let id = ItemId::from_u128(0x3f2c9a10_6b7e_4d21_9a0c_58e1f4b2d7a3);
+        let json = serde_json::to_string(&id).expect("json");
+        assert_eq!(json, r#""3f2c9a10-6b7e-4d21-9a0c-58e1f4b2d7a3""#);
+        assert_eq!(serde_json::from_str::<ItemId>(&json).ok(), Some(id));
+        for bad in [r#""""#, r#""not-a-uuid""#, "42", r#""3f2c9a10-6b7e-4d21-9a0c""#] {
+            assert!(serde_json::from_str::<ItemId>(bad).is_err(), "{bad}");
+        }
+        assert!(matches!("zz".parse::<NetId>(), Err(ModelError::BadId(_))));
+    }
 
     #[test]
     fn rotation_normalises() {

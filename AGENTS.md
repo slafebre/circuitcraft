@@ -91,7 +91,9 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 - **Deterministic files.** Saving the same design twice gives byte-identical output.
 - **Native format.** A project is a folder: one `.ccproj` project file, one `.ccsch` file per
   schematic sheet and one `.ccpcb` board file, all pretty-printed JSON with a stable key and
-  element order. Every file carries a format version.
+  element order. Every file starts with `format` and `version`; a newer version is refused, not
+  guessed at. Item and net ids are random UUIDs, so branches never hand out the same id.
+  Reader and writer: `crates/io/src/native.rs`.
 
 ## Quality gate
 

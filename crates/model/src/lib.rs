@@ -48,13 +48,13 @@ pub enum ModelError {
     UnknownNet(&'static str),
     /// No item has this id.
     #[error("no item with id {0}")]
-    UnknownItem(u64),
-    /// Two items share an id, or an id is not below the board's id counter.
-    #[error("id {0} is duplicated or out of sequence")]
-    BadId(u64),
-    /// The board has run out of ids (2⁶⁴ of them).
-    #[error("out of item ids")]
-    IdsExhausted,
+    UnknownItem(ItemId),
+    /// An id is malformed, all zeros, used twice, or doesn't match where its item is filed.
+    #[error("bad id {0:?}: malformed, nil, duplicated or misfiled")]
+    BadId(String),
+    /// The system gave no random numbers for a new id.
+    #[error("no random numbers for a new id: {0}")]
+    NoRandomness(String),
     /// A collection is at its size limit ([`MAX_ITEMS`], [`MAX_PADS`], [`MAX_LAYERS`], ...).
     #[error("too many {0}")]
     TooMany(&'static str),
@@ -86,8 +86,6 @@ pub struct Board {
     pub texts: Items<Text>,
     /// Free drawings (outline sketches, silkscreen logos, documentation).
     pub graphics: Items<Graphic>,
-    /// The next id to hand out; every id on the board is below it.
-    pub next_id: u64,
 }
 
 fn cutouts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Contour>, D::Error> {
@@ -115,15 +113,30 @@ impl Board {
             zones: Items::default(),
             texts: Items::default(),
             graphics: Items::default(),
-            next_id: 1,
         }
     }
 
-    /// Hands out a fresh id.
-    pub fn fresh_id(&mut self) -> Result<u64, ModelError> {
-        let id = self.next_id;
-        self.next_id = id.checked_add(1).ok_or(ModelError::IdsExhausted)?;
-        Ok(id)
+    /// A new random id that no net or top-level item on the board has. A clash is about as
+    /// likely as guessing a 122-bit number, so the retries only guard against a broken random
+    /// source (footprint drawings aren't searched; [`Board::validate`] checks every id).
+    pub fn fresh_id(&self) -> Result<ItemId, ModelError> {
+        for _ in 0..8 {
+            let id = ItemId::random()?;
+            if !self.id_in_use(id) {
+                return Ok(id);
+            }
+        }
+        Err(ModelError::NoRandomness("the random source keeps repeating itself".to_owned()))
+    }
+
+    fn id_in_use(&self, id: ItemId) -> bool {
+        self.nets.contains(NetId::from_u128(id.as_u128()))
+            || self.tracks.contains(id)
+            || self.vias.contains(id)
+            || self.footprints.contains(id)
+            || self.zones.contains(id)
+            || self.texts.contains(id)
+            || self.graphics.contains(id)
     }
 
     /// The net with this name.
@@ -138,7 +151,7 @@ impl Board {
         if self.net_by_name(name).is_some() {
             return Err(ModelError::BadName(name.to_owned(), "a net with this name exists"));
         }
-        let id = NetId(self.fresh_id()?);
+        let id = NetId::from_u128(self.fresh_id()?.as_u128());
         self.nets.insert(Net { id, name: name.to_owned() })?;
         Ok(id)
     }
@@ -146,7 +159,7 @@ impl Board {
     /// Adds a track; its id is assigned here.
     pub fn add_track(&mut self, layer: LayerId, width: Nm, path: TrackPath, net: Option<NetId>) -> Result<ItemId, ModelError> {
         room(&self.tracks, "tracks")?;
-        let id = ItemId(self.fresh_id()?);
+        let id = self.fresh_id()?;
         let track = Track { id, layer, width, path, net };
         self.check_track(&track)?;
         self.tracks.insert(track)?;
@@ -159,7 +172,7 @@ impl Board {
             return Err(ModelError::BadLayer("via", "copper"));
         };
         room(&self.vias, "vias")?;
-        let id = ItemId(self.fresh_id()?);
+        let id = self.fresh_id()?;
         let via = Via { id, position, diameter, drill, from, to, net };
         self.check_via(&via)?;
         self.vias.insert(via)?;
@@ -168,8 +181,8 @@ impl Board {
 
     /// Removes any item (track, via, footprint, zone, text, drawing) or net by id. Removing a net
     /// disconnects everything on it.
-    pub fn remove(&mut self, id: u64) -> Result<(), ModelError> {
-        let item = ItemId(id);
+    pub fn remove(&mut self, id: ItemId) -> Result<(), ModelError> {
+        let item = id;
         let removed = self.tracks.remove(item).is_some()
             || self.vias.remove(item).is_some()
             || self.footprints.remove(item).is_some()
@@ -179,7 +192,7 @@ impl Board {
         if removed {
             return Ok(());
         }
-        let net = NetId(id);
+        let net = NetId::from_u128(id.as_u128());
         if self.nets.remove(net).is_none() {
             return Err(ModelError::UnknownItem(id));
         }
@@ -228,9 +241,12 @@ impl Board {
         self.stack.validate()?;
         self.check_collections()?;
         let mut ids = std::collections::BTreeSet::new();
-        let mut claim = |id: u64| if id >= self.next_id || !ids.insert(id) { Err(ModelError::BadId(id)) } else { Ok(()) };
+        // Nets and items share one id space, so `remove` and references are never ambiguous.
+        let mut claim = |id: u128| {
+            if id == 0 || !ids.insert(id) { Err(ModelError::BadId(ItemId::from_u128(id).to_string())) } else { Ok(()) }
+        };
         for n in self.nets.iter() {
-            claim(n.id.0)?;
+            claim(n.id.as_u128())?;
             check_name(&n.name, "net name")?;
         }
         let mut names: Vec<&str> = self.nets.iter().map(|n| n.name.as_str()).collect();
@@ -245,30 +261,30 @@ impl Board {
             check_contour(c, "cutout")?;
         }
         for t in self.tracks.iter() {
-            claim(t.id.0)?;
+            claim(t.id.as_u128())?;
             self.check_track(t)?;
         }
         for v in self.vias.iter() {
-            claim(v.id.0)?;
+            claim(v.id.as_u128())?;
             self.check_via(v)?;
         }
         for z in self.zones.iter() {
-            claim(z.id.0)?;
+            claim(z.id.as_u128())?;
             self.check_copper_layer(z.layer, "zone")?;
             self.check_net(z.net, "zone")?;
             check_contour(&z.outline, "zone outline")?;
             check_size(z.clearance, "zone clearance", true)?;
         }
         for t in self.texts.iter() {
-            claim(t.id.0)?;
+            claim(t.id.as_u128())?;
             self.check_text(t)?;
         }
         for g in self.graphics.iter() {
-            claim(g.id.0)?;
+            claim(g.id.as_u128())?;
             self.check_graphic(g)?;
         }
         for f in self.footprints.iter() {
-            claim(f.id.0)?;
+            claim(f.id.as_u128())?;
             check_point(f.position, "footprint position")?;
             check_name(&f.reference, "reference")?;
             check_len(&f.value, "value")?;
@@ -288,7 +304,7 @@ impl Board {
                 }
             }
             for g in &f.graphics {
-                claim(g.id.0)?;
+                claim(g.id.as_u128())?;
                 self.check_graphic(g)?;
             }
         }
@@ -311,13 +327,13 @@ impl Board {
         if let Some((_, what)) = lens.iter().find(|(n, _)| *n > MAX_ITEMS) {
             return Err(ModelError::TooMany(what));
         }
-        let misfiled = (self.nets.mismatched_key().map(|k| k.0))
-            .or_else(|| self.footprints.mismatched_key().map(|k| k.0))
-            .or_else(|| self.tracks.mismatched_key().map(|k| k.0))
-            .or_else(|| self.vias.mismatched_key().map(|k| k.0))
-            .or_else(|| self.zones.mismatched_key().map(|k| k.0))
-            .or_else(|| self.texts.mismatched_key().map(|k| k.0))
-            .or_else(|| self.graphics.mismatched_key().map(|k| k.0));
+        let misfiled = (self.nets.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.footprints.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.tracks.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.vias.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.zones.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.texts.mismatched_key().map(|k| k.to_string()))
+            .or_else(|| self.graphics.mismatched_key().map(|k| k.to_string()));
         match misfiled {
             Some(k) => Err(ModelError::BadId(k)),
             None => Ok(()),
@@ -489,7 +505,7 @@ mod tests {
         let path = line(p(0, 0), p(MM, 0));
         assert_eq!(b.add_track(TOP_SILK, Nm(1), path, None), Err(ModelError::BadLayer("track", "copper")));
         assert_eq!(b.add_track(TOP_COPPER, Nm(0), path, None), Err(ModelError::BadSize("track width")));
-        assert_eq!(b.add_track(TOP_COPPER, Nm(1), path, Some(NetId(99))), Err(ModelError::UnknownNet("track")));
+        assert_eq!(b.add_track(TOP_COPPER, Nm(1), path, Some(NetId::from_u128(99))), Err(ModelError::UnknownNet("track")));
         assert_eq!(b.add_track(TOP_COPPER, Nm(1), line(p(i64::MIN, 0), p(0, 0)), None), Err(ModelError::OutOfRange("track start")));
         assert!(matches!(b.add_via(p(0, 0), Nm(300), Nm(300), None), Err(ModelError::BadSize(_))));
         b.add_net("GND").expect("net");
@@ -504,10 +520,10 @@ mod tests {
         let mut b = Board::new("x");
         let gnd = b.add_net("GND").expect("net");
         let t = b.add_track(TOP_COPPER, Nm(1), line(p(0, 0), p(1, 0)), Some(gnd)).expect("track");
-        b.remove(gnd.0).expect("remove net");
+        b.remove(ItemId::from_u128(gnd.as_u128())).expect("remove net");
         assert_eq!(b.tracks.get(t).map(|t| t.net), Some(None));
-        b.remove(t.0).expect("remove track");
-        assert_eq!(b.remove(t.0), Err(ModelError::UnknownItem(t.0)));
+        b.remove(t).expect("remove track");
+        assert_eq!(b.remove(t), Err(ModelError::UnknownItem(t)));
         assert_eq!(b.validate(), Ok(()));
     }
 
@@ -519,9 +535,15 @@ mod tests {
         let mut dangling = b.clone();
         dangling.nets.remove(gnd);
         assert_eq!(dangling.validate(), Err(ModelError::UnknownNet("track")));
-        let mut stale = b.clone();
-        stale.next_id = 1;
-        assert!(matches!(stale.validate(), Err(ModelError::BadId(_))));
+        // A via filed under the track's id: two items, one id.
+        let mut twice = b.clone();
+        let track_id = b.tracks.iter().next().map(|t| t.id).expect("track");
+        let via = Via { id: track_id, position: p(0, 0), diameter: Nm(600), drill: Nm(300), from: TOP_COPPER, to: BOTTOM_COPPER, net: None };
+        twice.vias.insert(via.clone()).expect("room");
+        assert_eq!(twice.validate(), Err(ModelError::BadId(track_id.to_string())));
+        let mut nil = b.clone();
+        nil.vias.insert(Via { id: ItemId::from_u128(0), ..via }).expect("room");
+        assert!(matches!(nil.validate(), Err(ModelError::BadId(_))));
         let mut unnamed = b;
         unnamed.name = String::new();
         assert!(matches!(unnamed.validate(), Err(ModelError::BadName(..))));
@@ -545,19 +567,19 @@ mod tests {
     fn validate_catches_an_id_changed_in_place() {
         let mut b = Board::new("x");
         let t = b.add_track(TOP_COPPER, Nm(1), line(p(0, 0), p(1, 0)), None).expect("track");
-        b.next_id = 100;
+        let new = ItemId::from_u128(50);
         if let Some(track) = b.tracks.get_mut(t) {
-            track.id = ItemId(50);
+            track.id = new;
         }
-        assert!(b.tracks.get(ItemId(50)).is_none(), "still filed under the old id");
-        assert_eq!(b.validate(), Err(ModelError::BadId(t.0)));
+        assert!(b.tracks.get(new).is_none(), "still filed under the old id");
+        assert_eq!(b.validate(), Err(ModelError::BadId(t.to_string())));
         // A save and reload files it under its new id, which then validates.
         let back: Board = serde_json::from_str(&serde_json::to_string(&b).expect("json")).expect("parse");
-        assert!(back.tracks.get(ItemId(50)).is_some() && back.tracks.get(t).is_none());
+        assert!(back.tracks.get(new).is_some() && back.tracks.get(t).is_none());
         assert_eq!(back.validate(), Ok(()));
         // Removal goes by the key it is filed under, not the changed id.
-        assert_eq!(b.remove(50), Err(ModelError::UnknownItem(50)));
-        assert_eq!(b.remove(t.0), Ok(()));
+        assert_eq!(b.remove(new), Err(ModelError::UnknownItem(new)));
+        assert_eq!(b.remove(t), Ok(()));
         assert_eq!(b.validate(), Ok(()));
     }
 

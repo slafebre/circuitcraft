@@ -27,6 +27,11 @@ serde_json = "1"
 log = "0.4"
 clap = { version = "4", features = ["derive"] }
 
+# item ids: random v4 UUIDs (ROADMAP.md, decided 2026-11-13). uuid only formats and parses; the
+# random bits come from getrandom, which returns an error instead of panicking.
+uuid = { version = "1.29", default-features = false, features = ["serde"] }
+getrandom = "0.3.4"
+
 # geometry: polygon booleans and offsets on i64 coordinates (ROADMAP.md, decided 2026-11-13)
 i_overlay = { version = "9.1.0", default-features = false }
 

@@ -1,7 +1,10 @@
-//! File formats: detection today, EAGLE and KiCad board import in 0.1, fabrication outputs in 0.5.
+//! File formats: CircuitCraft's own project and board files ([`native`]), detection, EAGLE and
+//! KiCad board import in 0.1, fabrication outputs in 0.5.
 //!
 //! Every reader treats its input as hostile: no panics, bounded allocations, bounded recursion.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+pub mod native;
 
 /// How many bytes [`detect`] looks at.
 pub const SNIFF_LEN: usize = 4096;
@@ -9,6 +12,10 @@ pub const SNIFF_LEN: usize = 4096;
 /// A file format CircuitCraft recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
+    /// A CircuitCraft board (`.ccpcb`).
+    CircuitCraftBoard,
+    /// A CircuitCraft project (`.ccproj`).
+    CircuitCraftProject,
     /// EAGLE board, schematic or library (XML with an `<eagle>` root).
     Eagle,
     /// KiCad board (`(kicad_pcb …)`).
@@ -25,6 +32,8 @@ impl Format {
     /// A human-readable name.
     pub fn name(self) -> &'static str {
         match self {
+            Format::CircuitCraftBoard => "CircuitCraft board",
+            Format::CircuitCraftProject => "CircuitCraft project",
             Format::Eagle => "EAGLE",
             Format::KicadPcb => "KiCad board",
             Format::KicadSch => "KiCad schematic",
@@ -53,7 +62,22 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
     if text.starts_with('<') && has_eagle_root(text) {
         return Some(Format::Eagle);
     }
+    if text.starts_with('{') {
+        return match native_format(text) {
+            Some(native::BOARD_FORMAT) => Some(Format::CircuitCraftBoard),
+            Some(native::PROJECT_FORMAT) => Some(Format::CircuitCraftProject),
+            _ => None,
+        };
+    }
     None
+}
+
+/// The value of `"format"` when it is the first key of a JSON object, as native files write it;
+/// a `"format"` key anywhere else (nested, or after other keys) doesn't count.
+fn native_format(text: &str) -> Option<&str> {
+    let after = text.strip_prefix('{')?.trim_start().strip_prefix("\"format\"")?;
+    let value = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    value.split_once('"').map(|(v, _)| v)
 }
 
 /// Whether an XML prefix opens an `<eagle` element (after the declaration, comments and doctype).
@@ -87,8 +111,18 @@ mod tests {
     }
 
     #[test]
+    fn detects_native_files() {
+        assert_eq!(detect(b"{\n  \"format\": \"circuitcraft.board\",\n  \"version\": 1"), Some(Format::CircuitCraftBoard));
+        assert_eq!(detect(b"{\"format\":\"circuitcraft.project\"}"), Some(Format::CircuitCraftProject));
+        assert_eq!(detect(b"{\"format\": \"something.else\"}"), None);
+        assert_eq!(detect(b"{\"name\": 1}"), None);
+        assert_eq!(detect(b"{\"name\":\"x\",\"config\":{\"format\":\"circuitcraft.board\"}}"), None, "not the first key");
+        assert_eq!(detect(b"{\"version\": 1, \"format\": \"circuitcraft.board\"}"), None, "not the first key");
+    }
+
+    #[test]
     fn hostile_input_does_not_panic() {
-        for bytes in [&b""[..], b"(", b"<", b"<eagle", b"\xff\xfe\x00", &[b'('; 10_000]] {
+        for bytes in [&b""[..], b"(", b"<", b"<eagle", b"\xff\xfe\x00", &[b'('; 10_000], b"{\"format\"", b"{\"format\":\"x", &[b'{'; 10_000]] {
             let _ = detect(bytes);
         }
     }

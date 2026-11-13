@@ -48,7 +48,7 @@ Proves the workspace, the data model, the renderer and the agent interface on re
 | ✅ Workspace scaffold: crate layers, `cargo xtask ci` (fmt, clippy with deny lints, tests, layers, assets, wasm), licences, `AGENTS.md` with the house rules, `ATTRIBUTION.md`, command registry, CLI (`commands`, `exec`, `info`, `mcp`), MCP server, empty desktop and web shells | S |
 | ✅ `units` and `geom`: `i64` nanometre coordinates, lines, arcs, polygons with arcs, booleans, offsets and track strokes (on `i_overlay`) | M |
 | ✅ `model` v0: board outline, layer stack, pads, tracks, arcs, vias, copper polygons, text, footprints, nets; copy-on-write store with undo | M |
-| Native format v0: read and write, deterministic, with a version field | S |
+| ✅ Native format v0: read and write, deterministic, with a version field | S |
 | EAGLE `.brd` and KiCad board import, read-only | M |
 | Renderer: layered 2D GPU view, layer visibility and colours, single-layer mode, net highlight, pan and zoom | M |
 | Stroke font for silkscreen text (reusable from the Crafting Apps) | S |
@@ -134,7 +134,6 @@ panelization, our own simulator behind the simulator interface.
 | Decision | Options or notes | Needed by |
 |---|---|---|
 | Reference boards | Candidates: a 2-layer microcontroller board; a 4-layer ESP32 board with USB-C; a board with a USB high-speed differential pair. Prefer open designs so the community can rebuild them | 0.3 |
-| Item ids across branches | Ids are a per-board counter (`next_id`), which keeps files small and stable but lets two branches hand out the same id for different items, so a git merge of two edited boards can collide. Options: random 128-bit ids, or ids made of an author or branch prefix plus a counter | native format v0 (0.1) |
 | KiCad library content | CC-BY-SA-4.0 with an exception: check against the licence allowlist before importing it as bundled content | 0.5 |
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
@@ -150,6 +149,7 @@ panelization, our own simulator behind the simulator interface.
 | 2026-11-13 | EAGLE import is a hand-written, read-only XML reader, written from `eagle.dtd` and real files. The DTD is CC BY-ND 3.0 with a grant for programs that read or write the format; neither the DTD nor code generated from it goes into the repository |
 | 2026-11-13 | The test corpus is a manifest of upstream designs pinned by commit and checksum, fetched on demand by a planned `cargo xtask corpus` command (part of 0.1, not written yet) and never redistributed by us. First candidates: SparkFun Qwiic Shield, RedBoard Turbo and MicroMod ESP32 (EAGLE, CC-BY-SA-4.0); Corne keyboard (KiCad, CC-BY-4.0); solo-hw (KiCad, CC-BY-SA-4.0); Bus Pirate 5 (KiCad, MIT); Olimex ESP32-POE and Antmicro Jetson Nano baseboard (KiCad, Apache-2.0) |
 | 2026-11-13 | Native format: a project folder with one file per document (`.ccproj` project, `.ccsch` schematic sheet, `.ccpcb` board), written as pretty-printed JSON with a stable order so a re-save is byte-identical. The browser build opens and saves a zipped project folder |
+| 2026-11-13 | Item and net ids are random version 4 UUIDs, written in the usual hyphenated form, so items added on two git branches never share an id. They replace the per-board counter, which collided across branches and would have conflicted on every parallel edit. `uuid` (formatting and parsing only) and `getrandom` (MIT OR Apache-2.0) supply them; in the browser the random bits come from the Web Crypto API |
 | 2026-11-13 | Contributions are signed off with the Developer Certificate of Origin (`git commit -s`), described in CONTRIBUTING.md |
 | 2026-11-13 | Accept the licences egui and eframe pull in outside the allowlist, per crate: `Unicode-3.0` (ICU4X and Unicode data crates), `Zlib` (foldhash, slotmap, zlib-rs), `BSL-1.0` (clipboard-win, error-code). `cargo xtask licenses` enforces the list in `xtask/src/licenses.rs` |
 
@@ -185,3 +185,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-13 | 0.1 decisions settled: name, polygon library, EAGLE reader terms, test corpus, native format, DCO sign-off |
 | 2026-11-13 | Geometry landed: arcs, contours, polygon booleans, offsets and track strokes |
 | 2026-11-13 | Board model v0 landed: nets, footprints and pads, tracks, vias, zones, text and drawings in copy-on-write collections, with validation and undo/redo |
+| 2026-11-13 | Native format v0 landed: project folders with `.ccproj` and `.ccpcb` files, random UUID item ids, `file.open` and `file.save` commands |
