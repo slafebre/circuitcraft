@@ -15,7 +15,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "New Board",
         menu: Some("File/New Board"),
         shortcut: None,
-        params: r#"{"name"?: string (default "Untitled")}"#,
+        params: r#"{"name"?: string (default "Untitled")} (a new document: clears undo, forgets the project folder)"#,
         run: board_new,
     },
     CommandSpec {
@@ -153,7 +153,9 @@ fn board_new(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return Err(bad(format!("`name` must be 1 to {MAX_NAME_CHARS} characters")));
     }
-    s.doc.replace("New Board", Board::new(name));
+    // A new board is a new document, as after file.open: undo must not reach back into the old
+    // board, or it would bring that board back with the new board's save folder still set.
+    s.doc = Document::new(Board::new(name));
     s.folder = None;
     Ok(json!({ "name": s.board().name }))
 }
@@ -375,6 +377,23 @@ mod tests {
         assert_eq!(other.board(), s.board());
         assert!(other.doc().undo_label().is_none(), "opening starts a fresh history");
         other.execute("item.remove", &json!({ "id": t["id"] })).expect("ids survive the round trip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_cannot_put_a_board_in_another_project_folder() {
+        let dir = std::env::temp_dir().join(format!("circuitcraft-new-{}", std::process::id()));
+        let (a, b) = (dir.join("A"), dir.join("B"));
+        let mut s = Session::new();
+        s.execute("board.new", &json!({ "name": "Board A" })).expect("new A");
+        s.execute("file.save", &json!({ "path": a.to_string_lossy() })).expect("save A");
+        s.execute("board.new", &json!({ "name": "Board B" })).expect("new B");
+        s.execute("file.save", &json!({ "path": b.to_string_lossy() })).expect("save B");
+        assert_eq!(s.execute("edit.undo", &Value::Null).expect("undo")["undone"], Value::Null, "nothing before board.new");
+        s.execute("file.save", &json!({})).expect("save");
+        let mut check = Session::new();
+        check.execute("file.open", &json!({ "path": b.to_string_lossy() })).expect("open B");
+        assert_eq!(check.board().name, "Board B", "folder B still holds board B");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
