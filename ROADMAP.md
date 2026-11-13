@@ -49,14 +49,24 @@ Proves the workspace, the data model, the renderer and the agent interface on re
 | ✅ `units` and `geom`: `i64` nanometre coordinates, lines, arcs, polygons with arcs, booleans, offsets and track strokes (on `i_overlay`) | M |
 | ✅ `model` v0: board outline, layer stack, pads, tracks, arcs, vias, copper polygons, text, footprints, nets; copy-on-write store with undo | M |
 | ✅ Native format v0: read and write, deterministic, with a version field | S |
+| Undo by change set: an edit records what it added, removed and changed, in place of a snapshot of the whole board, once per command; every edit returns its change set and a revision number, for the renderer, the spatial index and incremental checks; a benchmark in CI holds the cost (see Risks) | M |
+| `model` v1, what real boards contain: slotted and unplated holes, pad shapes per layer, solder mask and paste expansion, via tenting; footprint text (designators and values), library link and assembly attributes; courtyard, fabrication, keepout and mechanical layers, with top and bottom layers paired for flipping; zone fills, holes, keepouts and thermal settings; board design settings; an outline assembled from loose lines and arcs | M |
+| Native format hardening: one item per line, unknown fields refused, the temporary file synced to disk before it replaces the old one. The format is unstable until 0.1 ships; from then on golden files pin it and every change comes with a migration | S |
+| Sessions hold a project: its documents, the selection and the view state | M |
+| Typed command parameters with a generated JSON Schema, and flags for read-only and desktop-only commands; MCP publishes the schemas | M |
+| Storage behind a trait: `io` reads and writes bytes, so the browser build can open and save | S |
 | EAGLE `.brd` and KiCad board import, read-only | M |
-| Renderer: layered 2D GPU view, layer visibility and colours, single-layer mode, net highlight, pan and zoom | M |
+| Renderer: display lists in `render`; layered 2D GPU view, layer visibility and colours, single-layer mode, net highlight, pan and zoom; SVG and PNG output without a GPU, for the CLI, MCP and CI | M |
+| `cargo xtask corpus`: fetches the pinned designs; the manifest records each board's expected item counts and the checksum of its reviewed render | S |
+| Fuzz and property tests for every file reader and for the geometry operations | S |
+| Autosave and recovery (a panic in the browser aborts, so the panic guard can't help there) | S |
 | Stroke font for silkscreen text (reusable from the Crafting Apps) | S |
 | `circuitcraft-cli` (`info`, `convert`, `run`) and MCP (`open`, `inspect`, `query`, `render`) | S |
 | Desktop app shell and web build | S |
 
-**Gate:** a corpus of permissively licensed public EAGLE and KiCad boards opens without a crash
-and renders recognisably, from the app, the CLI and MCP.
+**Gate:** every board in a corpus of permissively licensed public EAGLE and KiCad boards opens
+without a crash from the app, the CLI and MCP; its item counts match the corpus manifest; and its
+headless render matches the checksum of a render a person has reviewed.
 
 ### 0.3 Schematic capture
 
@@ -133,8 +143,12 @@ panelization, our own simulator behind the simulator interface.
 
 | Decision | Options or notes | Needed by |
 |---|---|---|
-| Reference boards | Candidates: a 2-layer microcontroller board; a 4-layer ESP32 board with USB-C; a board with a USB high-speed differential pair. Prefer open designs so the community can rebuild them | 0.3 |
-| KiCad library content | CC-BY-SA-4.0 with an exception: check against the licence allowlist before importing it as bundled content | 0.5 |
+| Reference boards | Candidates: a 2-layer microcontroller board; a 4-layer ESP32 board with USB-C; a board with a USB high-speed differential pair. Prefer open designs so the community can rebuild them. They decide what `model` v1 has to hold (a USB-C connector needs slotted holes, for example) | 0.1 |
+| A 0.2 release: check and order an imported board | Proposed: pull pour fill, Gerber X2 and Excellon output, our own Gerber and Excellon reader and basic checks against fab presets forward from 0.5. EAGLE and KiCad users get something useful before schematic capture, and import fidelity gets an objective test against the reference Gerbers many corpus repositories ship. The cost: schematic capture starts later | before 0.1 ships |
+| What 1.0 includes | Keep the autorouter and SPICE simulation in 1.0, or move them to 1.x so that 1.0 means fabricated boards plus push-and-shove routing | 0.5 |
+| Hosted web demo | Publish the browser build with 0.1, the cheapest way to show the project. Publishing needs the maintainer's yes | 0.1 |
+| FreeBSD | The README names it and CI doesn't build it: add a CI job or drop the claim | 0.1 |
+| KiCad library content | CC-BY-SA-4.0 with an exception: check against the licence allowlist before importing it as bundled content. Schematic capture needs symbols, so this is due with 0.3, not 0.5 | 0.3 |
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
 | Altium format work | Legal advice on studying Altium files made with your own licence, before any work starts | after 1.0 |
@@ -159,7 +173,8 @@ panelization, our own simulator behind the simulator interface.
 |---|---|---|
 | Router quality | Push-and-shove decides whether experienced designers take the tool seriously, and no open implementation can be used | Walkaround first; design the geometry and rule engine for shoving from 0.1; build from published research |
 | Scope | 1.0 includes autorouting and simulation, which makes the road long | Public 0.x releases; 0.5 must be good enough on its own |
-| Performance on large boards | Pours and checks on boards with thousands of nets must stay interactive | Integer geometry, spatial indexing, incremental checks and repour from the start |
+| Performance on large boards | Pours and checks on boards with thousands of nets must stay interactive. Measured on 2026-11-13 with whole-board undo snapshots: adding 100,000 tracks, one command each, took 134 s and 2.3 GB of memory (20,000 tracks: 4 s and 457 MB) | Undo by change set and a benchmark budget in CI (0.1); integer geometry, spatial indexing, incremental checks and repour from the start |
+| Time to a useful release | Nothing helps an EAGLE or KiCad user until 0.5, after all of schematic capture | Public 0.x releases; the proposed 0.2 release (open decision) |
 | Parts content | Without footprints and symbols nobody can design anything | Parametric generator in 0.5; imports from EAGLE and KiCad libraries; an open decision on bundling KiCad's libraries |
 | Import fidelity | EAGLE and KiCad users judge the app by how their existing designs open | Corpus-driven tests, round-trip checks through our own Gerber reader |
 | Altium format work | Legal uncertainty and large effort | Deferred until after 1.0 and a legal check |
@@ -186,3 +201,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-13 | Geometry landed: arcs, contours, polygon booleans, offsets and track strokes |
 | 2026-11-13 | Board model v0 landed: nets, footprints and pads, tracks, vias, zones, text and drawings in copy-on-write collections, with validation and undo/redo |
 | 2026-11-13 | Native format v0 landed: project folders with `.ccproj` and `.ccpcb` files, random UUID item ids, `file.open` and `file.save` commands |
+| 2026-11-13 | Architecture, hardware and product review: 0.1 gains undo by change set, `model` v1, format hardening, project sessions, typed command parameters, storage behind a trait, rendering without a GPU, the corpus command, fuzz tests and autosave, and its gate is now measurable. A 0.2 release, the scope of 1.0, a web demo and FreeBSD are open decisions; the reference boards are due with 0.1 and KiCad library content with 0.3 |
