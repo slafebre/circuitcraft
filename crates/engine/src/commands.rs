@@ -2,11 +2,11 @@
 
 use crate::{CommandSpec, EngineError, Session};
 use circuitcraft_io::native;
-use circuitcraft_model::{Board, Document, ItemId, NetId, TrackPath};
+use circuitcraft_model::{Board, ItemId, NetId, TrackPath};
 use circuitcraft_units::{Nm, Point};
 use serde_json::{Map, Value, json};
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Every command. Menus appear in the order their first command does here.
 pub static COMMANDS: &[CommandSpec] = &[
@@ -15,7 +15,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "New Board",
         menu: Some("File/New Board"),
         shortcut: None,
-        params: r#"{"name"?: string (default "Untitled")} (a new document: clears undo, forgets the project folder)"#,
+        params: r#"{"name"?: string (default "Untitled")} (undoable; the new board has no project folder until saved)"#,
         run: board_new,
     },
     CommandSpec {
@@ -23,7 +23,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "Open Project",
         menu: None,
         shortcut: None,
-        params: r#"{"path": string (project folder, .ccproj or .ccpcb)} -> {"name", "folder"} (desktop only; replaces the open board and clears undo)"#,
+        params: r#"{"path": string (project folder, .ccproj or .ccpcb)} -> {"name", "folder"} (desktop only; replaces the open board, undoably)"#,
         run: file_open,
     },
     CommandSpec {
@@ -31,7 +31,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "Save Project",
         menu: None,
         shortcut: None,
-        params: r#"{"path"?: string (project folder; default: where the board was opened or last saved)} -> {"folder", "project", "board"} (desktop only; writes <folder>/<folder name>.ccproj and .ccpcb)"#,
+        params: r#"{"path"?: string (project folder), "overwrite"?: bool (false)} -> {"folder", "project", "board"} (desktop only; without path: back to the files the board was opened from or last saved to; with path: Save As, where a folder without a project gets <folder name>.ccproj and .ccpcb (an existing <folder name>.ccpcb is refused unless overwrite), and a folder holding a project is refused unless overwrite, which saves into that project's files)"#,
         run: file_save,
     },
     CommandSpec { id: "edit.undo", label: "Undo", menu: Some("Edit/Undo"), shortcut: Some("Ctrl+Z"), params: "{} (none)", run: edit_undo },
@@ -103,6 +103,15 @@ fn opt_str<'a>(m: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>, 
     }
 }
 
+/// An optional boolean parameter.
+fn opt_bool(m: &Map<String, Value>, key: &str) -> Result<Option<bool>, EngineError> {
+    match m.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(other) => Err(bad(format!("`{key}` must be true or false, got {other}"))),
+    }
+}
+
 /// A required string parameter.
 fn req_str<'a>(m: &'a Map<String, Value>, key: &str) -> Result<&'a str, EngineError> {
     opt_str(m, key)?.ok_or_else(|| bad(format!("`{key}` is required")))
@@ -153,10 +162,9 @@ fn board_new(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
         return Err(bad(format!("`name` must be 1 to {MAX_NAME_CHARS} characters")));
     }
-    // A new board is a new document, as after file.open: undo must not reach back into the old
-    // board, or it would bring that board back with the new board's save folder still set.
-    s.doc = Document::new(Board::new(name));
-    s.folder = None;
+    // Undoable: the old board comes back with its own project folder (the session keys folders on
+    // the board's generation), so unsaved work is never lost and never saved in the wrong place.
+    s.doc.replace("New Board", Board::new(name));
     Ok(json!({ "name": s.board().name }))
 }
 
@@ -167,25 +175,38 @@ fn native_failed(e: native::NativeError) -> EngineError {
 fn file_open(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let m = object(params)?;
     let path = PathBuf::from(req_str(&m, "path")?);
-    let (board, folder) = native::open(&path).map_err(native_failed)?;
-    s.doc = Document::new(board);
-    s.folder = Some(folder);
-    Ok(json!({ "name": s.board().name, "folder": s.folder.as_deref().map(|f| f.to_string_lossy()) }))
+    let (board, target) = native::open(&path).map_err(native_failed)?;
+    s.doc.replace("Open", board);
+    s.set_target(target);
+    Ok(json!({ "name": s.board().name, "folder": s.folder().map(|f| f.to_string_lossy()) }))
 }
 
 fn file_save(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let m = object(params)?;
-    let folder = match opt_str(&m, "path")? {
-        Some(p) => PathBuf::from(p),
-        None => s.folder.clone().ok_or_else(|| bad("`path` is required: this board hasn't been saved yet"))?,
-    };
-    let paths = native::save_project(&folder, s.board()).map_err(native_failed)?;
-    s.folder = Some(paths.folder.clone());
-    Ok(json!({
-        "folder": paths.folder.to_string_lossy(),
-        "project": paths.project.to_string_lossy(),
-        "board": paths.board.to_string_lossy(),
-    }))
+    let overwrite = opt_bool(&m, "overwrite")?.unwrap_or(false);
+    match opt_str(&m, "path")? {
+        // Back to the files this board came from, whatever they are called.
+        None => {
+            let target = s.target().ok_or_else(|| bad("`path` is required: this board hasn't been saved yet"))?;
+            native::save(target, s.board()).map_err(native_failed)?;
+            Ok(saved(target))
+        }
+        // Save As.
+        Some(folder) => {
+            let target = native::save_project(Path::new(folder), s.board(), overwrite).map_err(native_failed)?;
+            let out = saved(&target);
+            s.set_target(target);
+            Ok(out)
+        }
+    }
+}
+
+fn saved(paths: &native::ProjectPaths) -> Value {
+    json!({
+        "folder": paths.folder().to_string_lossy(),
+        "project": paths.project().map(|p| p.to_string_lossy()),
+        "board": paths.board().to_string_lossy(),
+    })
 }
 
 fn edit_undo(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -298,16 +319,47 @@ fn about(_s: &mut Session, params: &Value) -> Result<Value, EngineError> {
 mod tests {
     use super::*;
 
+    /// A fresh folder under the system temp folder, removed when dropped, even if the test fails.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            TempDir(std::env::temp_dir().join(format!("circuitcraft-{tag}-{}-{n}", std::process::id())))
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn undo_across_file_open_brings_back_the_previous_project() {
+        let dir = TempDir::new("reopen");
+        let (a, b) = (dir.0.join("A"), dir.0.join("B"));
+        let mut other = Session::new();
+        other.execute("board.new", &json!({ "name": "Board B" })).expect("new B");
+        other.execute("file.save", &json!({ "path": b.to_string_lossy() })).expect("save B");
+        let mut s = Session::new();
+        s.execute("board.new", &json!({ "name": "Board A" })).expect("new A");
+        s.execute("file.save", &json!({ "path": a.to_string_lossy() })).expect("save A");
+        s.execute("file.open", &json!({ "path": b.to_string_lossy() })).expect("open B");
+        assert_eq!(s.folder(), Some(b.as_path()));
+        s.execute("edit.undo", &Value::Null).expect("undo the open");
+        assert_eq!((s.board().name.as_str(), s.folder()), ("Board A", Some(a.as_path())));
+        s.execute("edit.redo", &Value::Null).expect("redo the open");
+        assert_eq!((s.board().name.as_str(), s.folder()), ("Board B", Some(b.as_path())));
+    }
+
     #[test]
     fn file_detect_reads_a_kicad_board() {
-        let dir = std::env::temp_dir().join(format!("circuitcraft-detect-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("board.kicad_pcb");
+        let dir = TempDir::new("detect");
+        std::fs::create_dir_all(&dir.0).expect("temp dir");
+        let path = dir.0.join("board.kicad_pcb");
         std::fs::write(&path, "(kicad_pcb (version 20240108))").expect("write");
         let mut s = Session::new();
         let r = s.execute("file.detect", &json!({ "path": path.to_string_lossy() })).expect("detect");
         assert_eq!(r["format"], "KiCad board");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -356,8 +408,8 @@ mod tests {
 
     #[test]
     fn save_then_open_through_commands() {
-        let dir = std::env::temp_dir().join(format!("circuitcraft-save-{}", std::process::id()));
-        let folder = dir.join("Blinky");
+        let dir = TempDir::new("save");
+        let folder = dir.0.join("Blinky");
         let mut s = Session::new();
         s.execute("board.new", &json!({ "name": "Blinky" })).expect("new");
         assert!(matches!(s.execute("file.save", &json!({})), Err(EngineError::BadParams(_))), "nowhere to save yet");
@@ -375,26 +427,54 @@ mod tests {
         let opened = other.execute("file.open", &json!({ "path": folder.to_string_lossy() })).expect("open");
         assert_eq!(opened["name"], "Blinky");
         assert_eq!(other.board(), s.board());
-        assert!(other.doc().undo_label().is_none(), "opening starts a fresh history");
+        assert_eq!(other.doc().undo_label(), Some("Open"), "opening is undoable");
         other.execute("item.remove", &json!({ "id": t["id"] })).expect("ids survive the round trip");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn undo_cannot_put_a_board_in_another_project_folder() {
-        let dir = std::env::temp_dir().join(format!("circuitcraft-new-{}", std::process::id()));
-        let (a, b) = (dir.join("A"), dir.join("B"));
+    fn undo_brings_a_board_back_with_its_own_project_folder() {
+        let dir = TempDir::new("new");
+        let (a, b) = (dir.0.join("A"), dir.0.join("B"));
         let mut s = Session::new();
         s.execute("board.new", &json!({ "name": "Board A" })).expect("new A");
         s.execute("file.save", &json!({ "path": a.to_string_lossy() })).expect("save A");
         s.execute("board.new", &json!({ "name": "Board B" })).expect("new B");
         s.execute("file.save", &json!({ "path": b.to_string_lossy() })).expect("save B");
-        assert_eq!(s.execute("edit.undo", &Value::Null).expect("undo")["undone"], Value::Null, "nothing before board.new");
+        assert_eq!(s.execute("edit.undo", &Value::Null).expect("undo")["undone"], "New Board");
+        assert_eq!((s.board().name.as_str(), s.folder()), ("Board A", Some(a.as_path())), "A comes back with A's folder");
+        s.execute("net.add", &json!({ "name": "GND" })).expect("edit A");
         s.execute("file.save", &json!({})).expect("save");
-        let mut check = Session::new();
-        check.execute("file.open", &json!({ "path": b.to_string_lossy() })).expect("open B");
-        assert_eq!(check.board().name, "Board B", "folder B still holds board B");
-        let _ = std::fs::remove_dir_all(&dir);
+        let open = |path: &std::path::Path| {
+            let mut check = Session::new();
+            check.execute("file.open", &json!({ "path": path.to_string_lossy() })).expect("open");
+            check.board().clone()
+        };
+        assert_eq!(open(&b).name, "Board B", "folder B still holds board B");
+        assert!(open(&a).net_by_name("GND").is_some(), "A's edit went to folder A");
+    }
+
+    #[test]
+    fn a_new_board_does_not_lose_unsaved_work() {
+        let mut s = Session::new();
+        s.execute("net.add", &json!({ "name": "GND" })).expect("net");
+        s.execute("board.new", &json!({ "name": "Other" })).expect("new");
+        assert!(s.folder().is_none());
+        s.execute("edit.undo", &Value::Null).expect("undo");
+        assert!(s.board().net_by_name("GND").is_some(), "the unsaved net is back");
+    }
+
+    #[test]
+    fn save_to_another_folder_refuses_to_replace_a_project() {
+        let dir = TempDir::new("guard");
+        let x = dir.0.join("X");
+        let mut s = Session::new();
+        s.execute("board.new", &json!({ "name": "First" })).expect("new");
+        s.execute("file.save", &json!({ "path": x.to_string_lossy() })).expect("save");
+        let mut t = Session::new();
+        t.execute("board.new", &json!({ "name": "Second" })).expect("new");
+        assert!(matches!(t.execute("file.save", &json!({ "path": x.to_string_lossy() })), Err(EngineError::Failed(_))));
+        assert!(t.folder().is_none());
+        t.execute("file.save", &json!({ "path": x.to_string_lossy(), "overwrite": true })).expect("overwrite when asked");
     }
 
     #[test]
