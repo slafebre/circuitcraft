@@ -1,7 +1,9 @@
-//! Repository checks. `cargo xtask ci` runs them all, in the order a failure is cheapest to find.
+//! Repository checks and local packaging. `cargo xtask ci` runs every check, in the order a failure
+//! is cheapest to find.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod assets;
+mod bundle;
 mod layers;
 mod licenses;
 
@@ -16,7 +18,8 @@ commands:
   layers   check the crate layering (xtask/src/layers.rs)
   assets   check that every asset file has a row in ATTRIBUTION.md
   licenses check every dependency's licence against the allowlist (xtask/src/licenses.rs)
-  wasm     check that the browser build compiles";
+  wasm     check that the browser build compiles
+  bundle   build dist/CircuitCraft.app, a macOS app bundle for this machine (signed ad hoc)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,6 +30,7 @@ fn main() -> ExitCode {
         Some("assets") => assets::run(&root()),
         Some("licenses") => cmd_licenses(),
         Some("wasm") => cmd_wasm(),
+        Some("bundle") => bundle::run(&root()),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
             Ok(())
