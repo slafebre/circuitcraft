@@ -147,11 +147,11 @@ Crafting Apps house rules.
 
 ## Contributing
 
-CircuitCraft is developed in the open from the start. Until the first code lands, the most useful
-contributions are on [ROADMAP.md](ROADMAP.md): its open decisions, the choice of reference boards,
+CircuitCraft is developed in the open from the start. Right now the most useful contributions are
+on [ROADMAP.md](ROADMAP.md): its open decisions, the choice of reference boards,
 and public EAGLE and KiCad designs with permissive licences for the test corpus. Contribution
-guidelines, a code of conduct and the sign-off policy for contributions arrive with the first
-code.
+guidelines are in [CONTRIBUTING.md](CONTRIBUTING.md); every commit is signed off with the
+Developer Certificate of Origin (`git commit -s`).
 
 ## Relationship to the Crafting Apps
 
