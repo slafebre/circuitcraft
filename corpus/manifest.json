@@ -1,0 +1,122 @@
+{
+  "about": "Public boards the importers are tested on. Each is pinned by repository, commit, path and SHA-256, and fetched from its authors' repository by `cargo xtask corpus`; none is stored here. `counts` is what a person reviewed for the board as imported. `render` will hold the checksum of its reviewed render once there is a renderer.",
+  "boards": [
+    {
+      "name": "solo-usb-a",
+      "title": "Solo USB-A security key",
+      "by": "SoloKeys",
+      "license": "CC-BY-SA-4.0",
+      "format": "eagle",
+      "repo": "solokeys/solo-hw",
+      "commit": "fb5f6b4b8dd7732dcec339ded0cc36fe3dec9654",
+      "path": "solo/USB-A.brd",
+      "sha256": "a30b02a8b82311643c9fc312109bb702783f95cd6a7de132647894a3a3b03cf5",
+      "counts": { "copper": 2, "nets": 21, "footprints": 26, "pads": 95, "pads_reached": 82, "tracks": 429, "vias": 43, "zones": 1, "keepouts": 0, "holes": 2, "texts": 2, "drawings": 24, "outline": true, "cutouts": 1 },
+      "render": null
+    },
+    {
+      "name": "solo-a",
+      "title": "Solo A security key, four layers",
+      "by": "SoloKeys",
+      "license": "CC-BY-SA-4.0",
+      "format": "kicad",
+      "repo": "solokeys/solo-hw",
+      "commit": "fb5f6b4b8dd7732dcec339ded0cc36fe3dec9654",
+      "path": "kicad/solo-A.kicad_pcb",
+      "sha256": "745ac680cd453dca5a2d2cc297df0bee56e9231a997584d4f7d8e75ffd9aba9d",
+      "counts": { "copper": 4, "nets": 83, "footprints": 48, "pads": 244, "pads_reached": 196, "tracks": 806, "vias": 74, "zones": 2, "keepouts": 0, "holes": 0, "texts": 6, "drawings": 96, "outline": true, "cutouts": 1 },
+      "render": null
+    },
+    {
+      "name": "micromod-esp32",
+      "title": "SparkFun MicroMod ESP32 Processor, four layers",
+      "by": "SparkFun Electronics",
+      "license": "CC-BY-SA-4.0",
+      "format": "eagle",
+      "repo": "sparkfun/MicroMod_ESP32_Processor",
+      "commit": "0faa0480023b6428aa1653dea9e5e82c78e1e742",
+      "path": "Hardware/SparkFun_MicroMod_ESP32.brd",
+      "sha256": "1ab38c1dd6ef927e156ae83c68e7657a56c0804faf2b82689a43991685a22129",
+      "counts": { "copper": 4, "nets": 54, "footprints": 53, "pads": 232, "pads_reached": 165, "tracks": 640, "vias": 144, "zones": 4, "keepouts": 0, "holes": 0, "texts": 7, "drawings": 6, "outline": true, "cutouts": 0 },
+      "render": null
+    },
+    {
+      "name": "redboard-turbo",
+      "title": "SparkFun RedBoard Turbo",
+      "by": "SparkFun Electronics",
+      "license": "CC-BY-SA-4.0",
+      "format": "eagle",
+      "repo": "sparkfun/RedBoard_Turbo",
+      "commit": "5dfe5c56b2d9400931264a1e5947249898173f7e",
+      "path": "Hardware/RedBoard_Turbo.brd",
+      "sha256": "83ac7463cd2d4e693e2c5c04cf0e1df3893edc41f6458efcf6d5b4d2db2d85be",
+      "counts": { "copper": 2, "nets": 58, "footprints": 149, "pads": 240, "pads_reached": 180, "tracks": 607, "vias": 111, "zones": 2, "keepouts": 0, "holes": 0, "texts": 26, "drawings": 0, "outline": true, "cutouts": 0 },
+      "render": null
+    },
+    {
+      "name": "qwiic-shield",
+      "title": "SparkFun Qwiic Shield for Arduino",
+      "by": "SparkFun Electronics",
+      "license": "CC-BY-SA-4.0",
+      "format": "eagle",
+      "repo": "sparkfun/Qwiic_Shield_for_Arduino",
+      "commit": "6b0caeb5bf695d0aafa4904d23b4a3ab86315871",
+      "path": "Hardware/Qwiic Shield for Arduino.brd",
+      "sha256": "a2ed84a73f7cf3ef0825b6fb685809bc988b4e7004c752028c289b05e474846c",
+      "counts": { "copper": 2, "nets": 196, "footprints": 104, "pads": 112, "pads_reached": 91, "tracks": 298, "vias": 260, "zones": 2, "keepouts": 0, "holes": 0, "texts": 5, "drawings": 227, "outline": true, "cutouts": 0 },
+      "render": null
+    },
+    {
+      "name": "olimex-esp32-poe",
+      "title": "Olimex ESP32-PoE revision L, four layers",
+      "by": "Olimex",
+      "license": "Apache-2.0",
+      "format": "kicad",
+      "repo": "OLIMEX/ESP32-POE",
+      "commit": "deb38a377d50eadb04ddc7118a17a5ae58b1ee53",
+      "path": "HARDWARE/ESP32-PoE-hardware-revision-L/ESP32-PoE_Rev_L.kicad_pcb",
+      "sha256": "78bce8140fe7829d7c46c04cf5523d83ac61a5e8bf046e14d38140b1b99e6410",
+      "counts": { "copper": 4, "nets": 125, "footprints": 143, "pads": 498, "pads_reached": 446, "tracks": 2574, "vias": 221, "zones": 258, "keepouts": 21, "holes": 0, "texts": 45, "drawings": 7, "outline": true, "cutouts": 0 },
+      "render": null
+    },
+    {
+      "name": "corne-cherry",
+      "title": "Corne keyboard (Cherry, hotswap)",
+      "by": "foostan",
+      "license": "CC-BY-4.0",
+      "format": "kicad",
+      "repo": "foostan/crkbd",
+      "commit": "63366fb7f51cf2a796462fdd90527e99dd126055",
+      "path": "pcbs/corne-cherry/hotswap/corne-cherry.kicad_pcb",
+      "sha256": "71538a202cb28882b9c9f7b6fe60bf402fb705703a29c59cd6ebb99b9edbb540",
+      "counts": { "copper": 2, "nets": 158, "footprints": 180, "pads": 942, "pads_reached": 624, "tracks": 3027, "vias": 452, "zones": 925, "keepouts": 8, "holes": 0, "texts": 15, "drawings": 18, "outline": true, "cutouts": 73 },
+      "render": null
+    },
+    {
+      "name": "bus-pirate-5",
+      "title": "Bus Pirate 5 revision 10a, four layers",
+      "by": "Dangerous Prototypes",
+      "license": "MIT",
+      "format": "kicad",
+      "repo": "DangerousPrototypes/BusPirate5-hardware",
+      "commit": "acb9cd667ce608e7eb560a663938787343b424c4",
+      "path": "bus_pirate_pcb/5-REV10A/REV10a.kicad_pcb",
+      "sha256": "9b6ad556916bf5974da27bc6af76dca1cb4543e78071ba1d8403c60579a50030",
+      "counts": { "copper": 4, "nets": 198, "footprints": 220, "pads": 866, "pads_reached": 683, "tracks": 2417, "vias": 547, "zones": 15, "keepouts": 0, "holes": 0, "texts": 29, "drawings": 160, "outline": false, "cutouts": 0 },
+      "render": null
+    },
+    {
+      "name": "jetson-nano-baseboard",
+      "title": "Antmicro Jetson Nano baseboard, eight layers",
+      "by": "Antmicro",
+      "license": "Apache-2.0",
+      "format": "kicad",
+      "repo": "antmicro/jetson-nano-baseboard",
+      "commit": "d8d0b2d71ab4cc4bcdb204a09f78be40d4c8cda3",
+      "path": "jetson-nano-baseboard.kicad_pcb",
+      "sha256": "8fc7b361091f1ab5b2026f65fc0c0ea42e16caa705cd52e63c3c48e6ba887252",
+      "counts": { "copper": 8, "nets": 488, "footprints": 391, "pads": 1528, "pads_reached": 1239, "tracks": 15624, "vias": 794, "zones": 47, "keepouts": 1, "holes": 0, "texts": 106, "drawings": 167, "outline": true, "cutouts": 0 },
+      "render": null
+    }
+  ]
+}

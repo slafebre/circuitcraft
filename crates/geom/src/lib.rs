@@ -13,6 +13,8 @@
 mod arc;
 mod chain;
 mod contour;
+#[cfg(test)]
+mod properties;
 mod region;
 
 pub use arc::{Arc, Circle};

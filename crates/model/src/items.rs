@@ -101,6 +101,34 @@ impl Rotation {
     pub fn degrees(self) -> f64 {
         f64::from(self.0) / 1_000.0
     }
+
+    /// `p` turned about the origin by this rotation, to the nearest nanometre. Quarter turns are
+    /// exact. `None` when the result would leave the range of a coordinate.
+    pub fn turn(self, p: Point) -> Option<Point> {
+        let (x, y) = (p.x.0, p.y.0);
+        let (x, y) = match self.0.rem_euclid(360_000) {
+            0 => (x, y),
+            90_000 => (y.checked_neg()?, x),
+            180_000 => (x.checked_neg()?, y.checked_neg()?),
+            270_000 => (y, x.checked_neg()?),
+            _ => {
+                let (sin, cos) = self.degrees().to_radians().sin_cos();
+                let (fx, fy) = (x as f64, y as f64);
+                let (tx, ty) = ((fx * cos - fy * sin).round(), (fx * sin + fy * cos).round());
+                // Beyond 2^62 a float no longer converts to a coordinate safely.
+                if !(tx.abs() < 4.0e18 && ty.abs() < 4.0e18) {
+                    return None;
+                }
+                (tx as i64, ty as i64)
+            }
+        };
+        Some(Point::new(Nm(x), Nm(y)))
+    }
+
+    /// The rotation that undoes this one.
+    pub fn reversed(self) -> Rotation {
+        Rotation::from_millidegrees(-i64::from(self.0))
+    }
 }
 
 /// A side of the board: the one a footprint is mounted on, or the one a layer belongs to.
@@ -110,7 +138,7 @@ pub enum Side {
     /// The top side.
     #[default]
     Top,
-    /// The bottom side (mirrored).
+    /// The bottom side. A footprint there is mirrored left to right ([`Footprint::to_board`]).
     Bottom,
 }
 
@@ -391,9 +419,11 @@ pub struct Text {
     pub height: Nm,
     /// Stroke width of the drafting font.
     pub stroke: Nm,
-    /// Rotation.
+    /// Rotation, applied after the text is mirrored.
     pub rotation: Rotation,
-    /// Mirrored (reads correctly from the bottom).
+    /// Mirrored left to right about its anchor, before it is turned: how text on the bottom of
+    /// the board reads correctly from there. The same order as a footprint on the bottom
+    /// ([`Footprint::to_board`]).
     pub mirrored: bool,
     /// Horizontal anchoring.
     pub justify: Justify,
@@ -435,8 +465,9 @@ pub struct FootprintText {
     pub stroke: Nm,
     /// Rotation relative to the footprint.
     pub rotation: Rotation,
-    /// Mirrored against the footprint: a bottom-side footprint already mirrors everything it
-    /// holds, so its text reads correctly from the bottom with this off.
+    /// Mirrored against the footprint, about its anchor and before it is turned, as [`Text`]
+    /// is. A bottom-side footprint already mirrors everything it holds, so its text reads
+    /// correctly from the bottom with this off.
     pub mirrored: bool,
     /// Horizontal anchoring.
     pub justify: Justify,
@@ -522,6 +553,30 @@ pub struct Footprint {
 }
 
 impl Footprint {
+    /// Where a point of the footprint is on the board. A footprint on the bottom side is
+    /// mirrored left to right first (x becomes -x), then every footprint is turned by its
+    /// rotation and moved to its position. `None` when the point would leave the range of a
+    /// coordinate.
+    pub fn to_board(&self, p: Point) -> Option<Point> {
+        let p = self.rotation.turn(self.mirrored(p)?)?;
+        Some(Point::new(Nm(p.x.0.checked_add(self.position.x.0)?), Nm(p.y.0.checked_add(self.position.y.0)?)))
+    }
+
+    /// The point of the footprint that is at `p` on the board: the reverse of
+    /// [`Footprint::to_board`], to the nearest nanometre.
+    pub fn to_footprint(&self, p: Point) -> Option<Point> {
+        let p = Point::new(Nm(p.x.0.checked_sub(self.position.x.0)?), Nm(p.y.0.checked_sub(self.position.y.0)?));
+        self.mirrored(self.rotation.reversed().turn(p)?)
+    }
+
+    /// `p` mirrored left to right when the footprint is on the bottom side.
+    fn mirrored(&self, p: Point) -> Option<Point> {
+        match self.side {
+            Side::Top => Some(p),
+            Side::Bottom => Some(Point::new(Nm(p.x.0.checked_neg()?), p.y)),
+        }
+    }
+
     /// What `text` says on this footprint: the reference, the value or the text's own words.
     pub fn wording<'a>(&'a self, text: &'a FootprintText) -> &'a str {
         match &text.content {
@@ -889,6 +944,56 @@ mod tests {
             assert!(serde_json::from_str::<ItemId>(bad).is_err(), "{bad}");
         }
         assert!(matches!("zz".parse::<NetId>(), Err(ModelError::BadId(_))));
+    }
+
+    #[test]
+    fn a_footprint_places_its_points_on_the_board_and_back() {
+        let p = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+        let footprint = |rotation: i32, side: Side| Footprint {
+            id: ItemId::from_u128(1),
+            reference: "U1".to_owned(),
+            value: String::new(),
+            link: None,
+            assembly: Assembly { mounting: Mounting::SurfaceMount, in_bom: true, in_placement: true, fitted: true },
+            position: p(1_000, 2_000),
+            rotation: Rotation(rotation),
+            side,
+            pads: Vec::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+        };
+        // A pad 100 to the right of the origin and 10 up.
+        let pad = p(100, 10);
+        assert_eq!(footprint(0, Side::Top).to_board(pad), Some(p(1_100, 2_010)));
+        assert_eq!(footprint(90_000, Side::Top).to_board(pad), Some(p(990, 2_100)), "a quarter turn counter-clockwise");
+        assert_eq!(footprint(180_000, Side::Top).to_board(pad), Some(p(900, 1_990)));
+        assert_eq!(footprint(270_000, Side::Top).to_board(pad), Some(p(1_010, 1_900)));
+        // On the bottom the pad is mirrored left to right, then turned.
+        assert_eq!(footprint(0, Side::Bottom).to_board(pad), Some(p(900, 2_010)));
+        assert_eq!(footprint(90_000, Side::Bottom).to_board(pad), Some(p(990, 1_900)));
+        // 45 degrees: 100 along the diagonal, to the nearest nanometre.
+        assert_eq!(footprint(45_000, Side::Top).to_board(p(100, 0)), Some(p(1_071, 2_071)));
+        for rotation in [0, 30_000, 45_000, 90_000, 123_456, 180_000, 270_000, 359_999] {
+            for side in [Side::Top, Side::Bottom] {
+                let f = footprint(rotation, side);
+                let there = f.to_board(p(123_456, -654_321)).expect("in range");
+                let back = f.to_footprint(there).expect("in range");
+                assert!((back.x.0 - 123_456).abs() <= 1 && (back.y.0 + 654_321).abs() <= 1, "{rotation} {side:?}: {back:?}");
+            }
+        }
+        // Points that would leave the range of a coordinate are refused, not wrapped.
+        assert_eq!(footprint(0, Side::Top).to_board(p(i64::MAX, 0)), None);
+        assert_eq!(footprint(90_000, Side::Top).to_board(p(0, i64::MIN)), None);
+        assert_eq!(footprint(45_000, Side::Top).to_board(p(i64::MAX, i64::MAX)), None);
+        assert_eq!(footprint(0, Side::Bottom).to_board(p(i64::MIN, 0)), None);
+        assert_eq!(footprint(0, Side::Top).to_footprint(p(i64::MIN, 0)), None);
+        // A turn alone says so too, rather than hand back a coordinate cut off at the largest.
+        assert_eq!(Rotation(45_000).turn(p(i64::MAX, i64::MAX)), None);
+        assert_eq!(Rotation(30_000).turn(p(i64::MIN, 0)), None);
+        // Just inside what a coordinate holds, it still turns: to the diagonal, give or take the
+        // rounding of numbers this large.
+        let turned = Rotation(45_000).turn(p(4_000_000_000_000_000_000, 0));
+        assert!(turned.is_some_and(|q| (q.x.0 - q.y.0).abs() < 4_096 && (q.x.0 - 2_828_427_124_746_190_097).abs() < 4_096), "{turned:?}");
     }
 
     #[test]

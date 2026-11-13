@@ -4,6 +4,7 @@
 
 mod assets;
 mod bundle;
+mod corpus;
 mod layers;
 mod licenses;
 
@@ -19,7 +20,10 @@ commands:
   assets   check that every asset file has a row in ATTRIBUTION.md
   licenses check every dependency's licence against the allowlist (xtask/src/licenses.rs)
   wasm     check that the browser build compiles
-  bundle   build dist/CircuitCraft.app, a macOS app bundle for this machine (signed ad hoc)";
+  bundle   build dist/CircuitCraft.app, a macOS app bundle for this machine (signed ad hoc)
+  corpus   fetch the public boards pinned in corpus/manifest.json into target/corpus, import each
+           and compare it with the manifest (needs curl and a network; --offline uses what is
+           there; board names limit it to those boards)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,6 +35,7 @@ fn main() -> ExitCode {
         Some("licenses") => cmd_licenses(),
         Some("wasm") => cmd_wasm(),
         Some("bundle") => bundle::run(&root()),
+        Some("corpus") => corpus::run(&root(), args.get(1..).unwrap_or_default()),
         Some("-h" | "--help" | "help") | None => {
             println!("{USAGE}");
             Ok(())
