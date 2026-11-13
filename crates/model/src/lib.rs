@@ -60,6 +60,9 @@ pub enum ModelError {
     /// The system gave no random numbers for a new id.
     #[error("no random numbers for a new id: {0}")]
     NoRandomness(String),
+    /// A layer's side or pair doesn't fit the layer stack.
+    #[error("layer {0:?}: {1}")]
+    BadStack(String, &'static str),
     /// A pad's copper, hole and net don't fit together.
     #[error("pad {0:?}: {1}")]
     BadPad(String, &'static str),
