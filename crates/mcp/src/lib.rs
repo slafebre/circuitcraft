@@ -1,7 +1,8 @@
 //! A Model Context Protocol server over the engine's commands.
 //!
 //! JSON-RPC 2.0, one message per line (the MCP stdio transport). Agents get the same commands as
-//! the menus: `list_commands` describes them and `execute` runs any of them with JSON parameters.
+//! the menus: `list_commands` describes them, each with the JSON Schema of its parameters and
+//! whether it only reports, and `execute` runs any of them with JSON parameters.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use circuitcraft_engine::{COMMANDS, Session};
@@ -84,7 +85,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "circuitcraft", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "CircuitCraft: schematic capture and PCB layout. Call list_commands to see every command, then execute to run one with JSON parameters.",
+        "instructions": "CircuitCraft: schematic capture and PCB layout. Call list_commands to see every command with the JSON Schema of its parameters (`params`) and whether it only reports (`readOnly`), then execute to run one.",
     })
 }
 
@@ -92,12 +93,13 @@ fn tools() -> Value {
     json!([
         {
             "name": "list_commands",
-            "description": "Every CircuitCraft command: id, label, menu path, shortcut and a description of its JSON parameters.",
+            "description": "Every CircuitCraft command: id, label, menu path, shortcut, what it does and returns (about), the JSON Schema of its parameters (params), whether it only reports (readOnly) and whether it needs the desktop app (desktopOnly).",
             "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true },
         },
         {
             "name": "execute",
-            "description": "Run any CircuitCraft command by id with JSON parameters, exactly as the menus do. Returns the command's JSON result.",
+            "description": "Run any CircuitCraft command by id with JSON parameters, exactly as the menus do. The parameters must fit the schema list_commands gives for the command; a parameter it doesn't have is refused. Returns the command's JSON result.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -140,7 +142,7 @@ mod tests {
     use super::*;
 
     fn run(input: &str) -> Vec<Value> {
-        let mut s = Session::new();
+        let mut s = Session::in_memory();
         let mut out = Vec::new();
         serve(&mut s, input.as_bytes(), &mut out).expect("serve");
         String::from_utf8(out).expect("utf8").lines().map(|l| serde_json::from_str(l).expect("json")).collect()
@@ -163,8 +165,27 @@ mod tests {
         assert_eq!(replies.len(), 4, "the notification gets no reply");
         assert_eq!(replies[0]["result"]["serverInfo"]["name"], "circuitcraft");
         assert_eq!(replies[1]["result"]["tools"][1]["name"], "execute");
+        assert_eq!(replies[1]["result"]["tools"][0]["annotations"]["readOnlyHint"], true);
         assert_eq!(replies[2]["result"]["isError"], false);
         assert_eq!(replies[3]["result"]["structuredContent"]["name"], "Blinky");
+    }
+
+    #[test]
+    fn the_command_list_publishes_each_schema_and_a_bad_parameter_is_named() {
+        let replies = run(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_commands"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"command":"via.add","params":{"at":[1,2],"size":1}}}}"#,
+            "\n",
+        ));
+        let commands = replies[0]["result"]["structuredContent"]["result"].as_array().expect("the list");
+        let via = commands.iter().find(|c| c["id"] == "via.add").expect("via.add");
+        assert_eq!(via["params"]["required"], json!(["at"]));
+        assert_eq!(via["params"]["additionalProperties"], false);
+        assert_eq!(via["readOnly"], false);
+        assert_eq!(commands.iter().find(|c| c["id"] == "board.info").map(|c| &c["readOnly"]), Some(&json!(true)));
+        assert_eq!(replies[1]["result"]["isError"], true);
+        assert!(replies[1]["result"]["content"][0]["text"].as_str().is_some_and(|t| t.contains("`size`")));
     }
 
     #[test]
@@ -183,7 +204,7 @@ mod tests {
 
     #[test]
     fn overlong_message_ends_the_session() {
-        let mut s = Session::new();
+        let mut s = Session::in_memory();
         let huge = vec![b'x'; (MAX_MESSAGE_BYTES + 10) as usize];
         assert!(matches!(serve(&mut s, &huge[..], Vec::new()), Err(McpError::MessageTooLong)));
     }

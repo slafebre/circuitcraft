@@ -77,14 +77,19 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 
 - **Everything is a command.** Every user-visible action is a `CommandSpec` in
   `crates/engine/src/commands.rs`: a stable lower-case id of our own (`board.new`), a label, a
-  menu path, a default shortcut, documented JSON parameters and a JSON `run`, plus tests. Menus,
+  menu path, a default shortcut, a type its JSON parameters are read into (the published JSON
+  Schema is generated from it), whether it only reports, and a `run`, plus tests. Menus,
   shortcuts, the CLI, the control channel and MCP all reach the same commands.
 - **Programmatic calls never open dialogs.** A JSON call runs with defaults.
 - **Layering** is enforced by `cargo xtask layers` (table in `xtask/src/layers.rs`):
   L0 `units`, `geom` → L1 `model` → L2 `library`, `rules`, `render` → L3 `drc`, `pour`, `router`,
   `io`, `sim` → L4 `engine` → L5 `ui-egui`, `mcp` → apps. Nothing below L5 depends on egui,
   eframe, winit, wgpu or rfd. **The UI crate is swappable.**
-- **The UI is thin.** Panels read engine state and act only through `Session::execute`.
+- **The UI is thin.** Panels read engine state and act only through `Session::execute`. The
+  selection and the view (active layer, hidden layers) are session state, changed by commands.
+- **Files go through storage.** In the libraries, only `crates/io/src/storage.rs` touches `std::fs`: the
+  disk on the desktop, memory in the browser and in tests. A test never writes outside a
+  temporary folder or memory, and never reads the recovery folder of whoever runs it.
 - **Integer geometry.** Lengths are `Nm` (`i64` nanometres). Floating point only at the edges.
 - **Rust only** in the apps: no handwritten JavaScript or TypeScript, no Electron, Tauri or web
   view. **Never break the web build.**

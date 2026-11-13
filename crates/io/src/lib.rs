@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod native;
+pub mod storage;
 
 /// How many bytes [`detect`] looks at.
 pub const SNIFF_LEN: usize = 4096;
