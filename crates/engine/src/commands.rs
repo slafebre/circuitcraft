@@ -1,10 +1,12 @@
 //! The command table. Add a command here with tests; every front end picks it up.
 
 use crate::{CommandSpec, EngineError, Session};
-use circuitcraft_model::{Board, NetId, TrackPath};
+use circuitcraft_io::native;
+use circuitcraft_model::{Board, Document, ItemId, NetId, TrackPath};
 use circuitcraft_units::{Nm, Point};
 use serde_json::{Map, Value, json};
 use std::io::Read as _;
+use std::path::PathBuf;
 
 /// Every command. Menus appear in the order their first command does here.
 pub static COMMANDS: &[CommandSpec] = &[
@@ -16,6 +18,22 @@ pub static COMMANDS: &[CommandSpec] = &[
         params: r#"{"name"?: string (default "Untitled")}"#,
         run: board_new,
     },
+    CommandSpec {
+        id: "file.open",
+        label: "Open Project",
+        menu: None,
+        shortcut: None,
+        params: r#"{"path": string (project folder, .ccproj or .ccpcb)} -> {"name", "folder"} (desktop only; replaces the open board and clears undo)"#,
+        run: file_open,
+    },
+    CommandSpec {
+        id: "file.save",
+        label: "Save Project",
+        menu: None,
+        shortcut: None,
+        params: r#"{"path"?: string (project folder; default: where the board was opened or last saved)} -> {"folder", "project", "board"} (desktop only; writes <folder>/<folder name>.ccproj and .ccpcb)"#,
+        run: file_save,
+    },
     CommandSpec { id: "edit.undo", label: "Undo", menu: Some("Edit/Undo"), shortcut: Some("Ctrl+Z"), params: "{} (none)", run: edit_undo },
     CommandSpec { id: "edit.redo", label: "Redo", menu: Some("Edit/Redo"), shortcut: Some("Ctrl+Y"), params: "{} (none)", run: edit_redo },
     CommandSpec {
@@ -23,7 +41,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         label: "Remove Item",
         menu: None,
         shortcut: None,
-        params: r#"{"id": integer} (any track, via, footprint, zone, text, drawing or net)"#,
+        params: r#"{"id": string (UUID)} (any track, via, footprint, zone, text, drawing or net)"#,
         run: item_remove,
     },
     CommandSpec { id: "net.add", label: "Add Net", menu: None, shortcut: None, params: r#"{"name": string} -> {"id"}"#, run: net_add },
@@ -136,7 +154,36 @@ fn board_new(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
         return Err(bad(format!("`name` must be 1 to {MAX_NAME_CHARS} characters")));
     }
     s.doc.replace("New Board", Board::new(name));
+    s.folder = None;
     Ok(json!({ "name": s.board().name }))
+}
+
+fn native_failed(e: native::NativeError) -> EngineError {
+    EngineError::Failed(e.to_string())
+}
+
+fn file_open(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
+    let m = object(params)?;
+    let path = PathBuf::from(req_str(&m, "path")?);
+    let (board, folder) = native::open(&path).map_err(native_failed)?;
+    s.doc = Document::new(board);
+    s.folder = Some(folder);
+    Ok(json!({ "name": s.board().name, "folder": s.folder.as_deref().map(|f| f.to_string_lossy()) }))
+}
+
+fn file_save(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
+    let m = object(params)?;
+    let folder = match opt_str(&m, "path")? {
+        Some(p) => PathBuf::from(p),
+        None => s.folder.clone().ok_or_else(|| bad("`path` is required: this board hasn't been saved yet"))?,
+    };
+    let paths = native::save_project(&folder, s.board()).map_err(native_failed)?;
+    s.folder = Some(paths.folder.clone());
+    Ok(json!({
+        "folder": paths.folder.to_string_lossy(),
+        "project": paths.project.to_string_lossy(),
+        "board": paths.board.to_string_lossy(),
+    }))
 }
 
 fn edit_undo(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -151,16 +198,16 @@ fn edit_redo(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
 
 fn item_remove(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let m = object(params)?;
-    let id = m.get("id").and_then(Value::as_u64).ok_or_else(|| bad("`id` must be a non-negative integer"))?;
+    let id: ItemId = req_str(&m, "id")?.parse()?;
     s.doc.edit("Remove", |b| b.remove(id))?;
-    Ok(json!({ "removed": id }))
+    Ok(json!({ "removed": id.to_string() }))
 }
 
 fn net_add(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let m = object(params)?;
     let name = req_str(&m, "name")?;
     let id = s.doc.edit("Add Net", |b| b.add_net(name))?;
-    Ok(json!({ "id": id.0 }))
+    Ok(json!({ "id": id.to_string() }))
 }
 
 fn track_add(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -172,7 +219,7 @@ fn track_add(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let path = TrackPath::Line { from: point(&m, "from")?, to: point(&m, "to")? };
     let net = net(board, &m)?;
     let id = s.doc.edit("Add Track", |b| b.add_track(layer, width, path, net))?;
-    Ok(json!({ "id": id.0 }))
+    Ok(json!({ "id": id.to_string() }))
 }
 
 fn via_add(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -182,7 +229,7 @@ fn via_add(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     let drill = opt_mm(&m, "drill", 0.3)?;
     let net = net(s.board(), &m)?;
     let id = s.doc.edit("Add Via", |b| b.add_via(at, diameter, drill, net))?;
-    Ok(json!({ "id": id.0 }))
+    Ok(json!({ "id": id.to_string() }))
 }
 
 fn board_info(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
@@ -203,6 +250,7 @@ fn board_info(s: &mut Session, params: &Value) -> Result<Value, EngineError> {
             "vias": b.vias.len(),
             "zones": b.zones.len(),
         },
+        "folder": s.folder().map(|f| f.to_string_lossy()),
         "undo": s.doc().undo_label(),
         "redo": s.doc().redo_label(),
     }))
@@ -218,8 +266,9 @@ fn file_detect(_s: &mut Session, params: &Value) -> Result<Value, EngineError> {
     Ok(json!({
         "path": path,
         "format": format.map(|f| f.name()),
-        "importable": false,
+        "importable": matches!(format, Some(circuitcraft_io::Format::CircuitCraftBoard | circuitcraft_io::Format::CircuitCraftProject)),
         "note": match format {
+            Some(circuitcraft_io::Format::CircuitCraftBoard | circuitcraft_io::Format::CircuitCraftProject) => "open it with file.open",
             Some(_) => "recognised; import arrives in 0.1",
             None => "not a format CircuitCraft recognises",
         },
@@ -297,9 +346,46 @@ mod tests {
         assert!(bad(&mut s, "via.add", json!({ "at": [0, 0], "diameter": 0.3, "drill": 0.3 })));
         assert!(bad(&mut s, "net.add", json!({ "name": "" })));
         assert!(bad(&mut s, "item.remove", json!({ "id": 12345 })));
-        assert!(bad(&mut s, "item.remove", json!({ "id": -1 })));
+        assert!(bad(&mut s, "item.remove", json!({ "id": "not-a-uuid" })));
+        assert!(bad(&mut s, "item.remove", json!({ "id": "3f2c9a10-6b7e-4d21-9a0c-58e1f4b2d7a3" })));
         assert_eq!(s.board().tracks.len() + s.board().vias.len() + s.board().nets.len(), 0);
         assert!(s.doc().undo_label().is_none(), "refused edits must not enter the undo history");
+    }
+
+    #[test]
+    fn save_then_open_through_commands() {
+        let dir = std::env::temp_dir().join(format!("circuitcraft-save-{}", std::process::id()));
+        let folder = dir.join("Blinky");
+        let mut s = Session::new();
+        s.execute("board.new", &json!({ "name": "Blinky" })).expect("new");
+        assert!(matches!(s.execute("file.save", &json!({})), Err(EngineError::BadParams(_))), "nowhere to save yet");
+        s.execute("net.add", &json!({ "name": "GND" })).expect("net");
+        let t = s.execute("track.add", &json!({ "layer": "Top Copper", "width": 0.25, "from": [0, 0], "to": [10, 0], "net": "GND" })).expect("track");
+        let saved = s.execute("file.save", &json!({ "path": folder.to_string_lossy() })).expect("save");
+        assert!(saved["board"].as_str().is_some_and(|b| b.ends_with("Blinky.ccpcb")));
+        s.execute("via.add", &json!({ "at": [10, 0] })).expect("via");
+        s.execute("file.save", &json!({})).expect("save again to the same folder");
+        let detected = s.execute("file.detect", &json!({ "path": saved["board"] })).expect("detect");
+        assert_eq!(detected["format"], "CircuitCraft board");
+        assert_eq!(detected["importable"], true);
+
+        let mut other = Session::new();
+        let opened = other.execute("file.open", &json!({ "path": folder.to_string_lossy() })).expect("open");
+        assert_eq!(opened["name"], "Blinky");
+        assert_eq!(other.board(), s.board());
+        assert!(other.doc().undo_label().is_none(), "opening starts a fresh history");
+        other.execute("item.remove", &json!({ "id": t["id"] })).expect("ids survive the round trip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_open_failures_change_nothing() {
+        let mut s = Session::new();
+        s.execute("net.add", &json!({ "name": "GND" })).expect("net");
+        assert!(matches!(s.execute("file.open", &json!({ "path": "/definitely/not/here" })), Err(EngineError::Failed(_))));
+        assert!(matches!(s.execute("file.open", &json!({})), Err(EngineError::BadParams(_))));
+        assert_eq!(s.board().nets.len(), 1);
+        assert!(s.folder().is_none());
     }
 
     #[test]

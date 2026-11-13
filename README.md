@@ -112,7 +112,8 @@ Decisions that shape everything else:
 ## Drive it from agents, MCP and the CLI
 
 `circuitcraft-cli commands`, `exec`, `info` and `mcp` (with the `list_commands` and `execute`
-tools) work today. The rest below is the 0.1 design sketch.
+tools) work today, and so do the `file.open` and `file.save` commands for project folders. The
+rest below is the 0.1 design sketch.
 
 ```sh
 circuitcraft-cli info board.ccpcb                     # layers, nets, components, extents

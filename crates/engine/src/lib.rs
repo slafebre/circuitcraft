@@ -11,6 +11,7 @@ pub use commands::COMMANDS;
 
 use circuitcraft_model::{Board, Document, ModelError};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// Why a command did not run or did not finish.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -66,6 +67,8 @@ pub fn command(id: &str) -> Option<&'static CommandSpec> {
 pub struct Session {
     /// The open board and its undo history.
     doc: Document,
+    /// The project folder the board was opened from or last saved to.
+    folder: Option<PathBuf>,
 }
 
 impl Default for Session {
@@ -77,7 +80,12 @@ impl Default for Session {
 impl Session {
     /// A session with a new, empty board.
     pub fn new() -> Session {
-        Session { doc: Document::new(Board::new("Untitled")) }
+        Session { doc: Document::new(Board::new("Untitled")), folder: None }
+    }
+
+    /// The project folder the board was opened from or last saved to, if any.
+    pub fn folder(&self) -> Option<&Path> {
+        self.folder.as_deref()
     }
 
     /// The board being edited.

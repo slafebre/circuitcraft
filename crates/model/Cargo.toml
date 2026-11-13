@@ -16,6 +16,12 @@ circuitcraft-units = { workspace = true }
 circuitcraft-geom = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
+getrandom = { workspace = true }
+
+# In the browser the random bits for new ids come from the Web Crypto API.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
