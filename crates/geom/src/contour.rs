@@ -56,8 +56,12 @@ impl Contour {
 
     /// A circle of radius `r` around `center`, as a single full-circle arc.
     pub fn circle(center: Point, r: Nm) -> Result<Contour, GeomError> {
+        check_point(center)?;
         let start = Point::new(center.x.checked_add(r)?, center.y);
         let mid = Point::new(center.x.checked_sub(r)?, center.y);
+        // checked_add/sub only catch i64 overflow; the design range is narrower.
+        check_point(start)?;
+        check_point(mid)?;
         Ok(Contour { start, edges: vec![Edge::Arc { mid, to: start }] })
     }
 
@@ -131,7 +135,20 @@ impl Polygon {
     /// A polygon from contours (the first is the outer boundary), arcs approximated within
     /// `tolerance`.
     pub fn from_contours(outer: &Contour, holes: &[Contour], tolerance: Nm) -> Result<Polygon, GeomError> {
-        Ok(Polygon { outer: outer.flatten(tolerance)?, holes: holes.iter().map(|h| h.flatten(tolerance)).collect::<Result<_, _>>()? })
+        // One point budget for all rings together: many small arc holes must not add up to
+        // far more memory than their input suggests.
+        let outer = outer.flatten(tolerance)?;
+        let mut total = outer.len();
+        let mut rings = Vec::with_capacity(holes.len().min(MAX_POINTS));
+        for h in holes {
+            let ring = h.flatten(tolerance)?;
+            total = total.saturating_add(ring.len());
+            if total > MAX_POINTS {
+                return Err(GeomError::TooManyPoints);
+            }
+            rings.push(ring);
+        }
+        Ok(Polygon { outer, holes: rings })
     }
 
     /// Twice the filled area (outer minus holes), exactly, whatever the rings' directions.
@@ -205,6 +222,28 @@ mod tests {
         let hole = Contour::rect(Rect::from_corners(p(2, 2), p(4, 4)));
         let poly = Polygon::from_contours(&outer, &[hole], Nm(1)).expect("polygon");
         assert_eq!(poly.area2(), Some(200 - 8));
+    }
+
+    #[test]
+    fn circle_points_must_be_in_the_design_range() {
+        let max = circuitcraft_units::MAX_ABS;
+        assert_eq!(Contour::circle(p(max, 0), Nm(1)), Err(GeomError::OutOfRange));
+        assert_eq!(Contour::circle(p(-max, 0), Nm(1)), Err(GeomError::OutOfRange));
+        assert_eq!(Contour::circle(p(0, max + 1), Nm(1)), Err(GeomError::OutOfRange));
+        assert!(Contour::circle(p(max - 1, 0), Nm(1)).is_ok());
+    }
+
+    #[test]
+    fn polygon_point_budget_covers_all_rings() {
+        let outer = Contour::rect(Rect::from_corners(p(0, 0), p(1_000_000_000, 1_000_000_000)));
+        // A 10 mm hole at 1 nm tolerance would need ~7000 segments, so it is capped at
+        // MAX_ARC_SEGMENTS points; enough of them exceed the shared budget although each ring
+        // alone is well under it.
+        let hole = Contour::circle(p(500_000_000, 500_000_000), Nm(10_000_000)).expect("hole");
+        assert_eq!(hole.flatten(Nm(1)).expect("flatten").len(), crate::MAX_ARC_SEGMENTS);
+        let n = MAX_POINTS / crate::MAX_ARC_SEGMENTS + 2;
+        let holes = vec![hole; n];
+        assert_eq!(Polygon::from_contours(&outer, &holes, Nm(1)), Err(GeomError::TooManyPoints));
     }
 
     #[test]

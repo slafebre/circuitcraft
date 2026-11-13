@@ -47,8 +47,9 @@ impl From<UnitError> for GeomError {
 
 /// Checks that a point lies inside the design range.
 pub(crate) fn check_point(p: Point) -> Result<(), GeomError> {
-    let max = circuitcraft_units::MAX_ABS;
-    if p.x.0.abs() > max || p.y.0.abs() > max { Err(GeomError::OutOfRange) } else { Ok(()) }
+    // unsigned_abs: abs() of i64::MIN would overflow.
+    let max = circuitcraft_units::MAX_ABS.unsigned_abs();
+    if p.x.0.unsigned_abs() > max || p.y.0.unsigned_abs() > max { Err(GeomError::OutOfRange) } else { Ok(()) }
 }
 
 /// An axis-aligned rectangle, `min` at the lower left, `max` at the upper right (inclusive).
@@ -125,6 +126,14 @@ mod tests {
         assert!(r.contains(p(4, 2)));
         assert!(!r.contains(p(5, 0)));
         assert_eq!(r.union(Rect::from_corners(p(9, 9), p(8, 8))).max, p(9, 9));
+    }
+
+    #[test]
+    fn i64_min_coordinates_are_rejected_not_a_panic() {
+        // abs() of i64::MIN overflows: this panicked before check_point used unsigned_abs.
+        assert_eq!(check_point(p(i64::MIN, 0)), Err(GeomError::OutOfRange));
+        assert_eq!(check_point(p(0, i64::MIN)), Err(GeomError::OutOfRange));
+        assert!(Contour::polyline(&[p(i64::MIN, i64::MIN)]).expect("contour").flatten(Nm(1)).is_err());
     }
 
     #[test]

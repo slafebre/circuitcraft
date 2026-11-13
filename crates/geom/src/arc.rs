@@ -51,7 +51,6 @@ impl Arc {
     pub fn circle(&self) -> Option<Circle> {
         let (sx, sy) = xy(self.start);
         let (mx, my) = xy(self.mid);
-        let (ex, ey) = xy(self.end);
         if self.start == self.end {
             if self.mid == self.start {
                 return None;
@@ -66,30 +65,31 @@ impl Arc {
         if cross == 0 {
             return None;
         }
-        let ccw = cross > 0;
-        // Circumcentre relative to `start`, for precision far from the origin.
-        let (bx, by) = (mx - sx, my - sy);
-        let (qx, qy) = (ex - sx, ey - sy);
-        let d = 2.0 * (bx * qy - by * qx);
-        let (b2, q2) = (bx * bx + by * by, qx * qx + qy * qy);
-        let cx = sx + (qy * b2 - by * q2) / d;
-        let cy = sy + (bx * q2 - qx * b2) / d;
-        let r = (sx - cx).hypot(sy - cy);
+        // Circumcentre relative to `start`, with exact integer numerators and denominator, so
+        // nearly collinear points can't cancel to a zero determinant.
+        let (bx, by) = diff(self.mid, self.start);
+        let (qx, qy) = diff(self.end, self.start);
+        let b2 = bx.checked_mul(bx)?.checked_add(by.checked_mul(by)?)?;
+        let q2 = qx.checked_mul(qx)?.checked_add(qy.checked_mul(qy)?)?;
+        let ux = qy.checked_mul(b2)?.checked_sub(by.checked_mul(q2)?)?;
+        let uy = bx.checked_mul(q2)?.checked_sub(qx.checked_mul(b2)?)?;
+        let d = 2.0 * cross as f64;
+        let (vx, vy) = (-(ux as f64) / d, -(uy as f64) / d); // start − centre
+        let (cx, cy) = (sx - vx, sy - vy);
+        let r = vx.hypot(vy);
         if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r == 0.0 {
             return None;
         }
-        let a0 = (sy - cy).atan2(sx - cx);
-        let a1 = (ey - cy).atan2(ex - cx);
-        let mut sweep = a1 - a0;
-        if ccw {
-            while sweep <= 0.0 {
-                sweep += TAU;
-            }
-        } else {
-            while sweep >= 0.0 {
-                sweep -= TAU;
-            }
-        }
+        // The turn from start to end, as atan2 of cross and dot of (start − c) and (end − c),
+        // written with the exact chord q = end − start so a huge radius doesn't cancel.
+        let (qxf, qyf) = (qx as f64, qy as f64);
+        let turn = (vx * qyf - vy * qxf).atan2(vx * vx + vy * vy + vx * qxf + vy * qyf);
+        let sweep = match (cross > 0, turn) {
+            (true, t) if t <= 0.0 => t + TAU,
+            (false, t) if t >= 0.0 => t - TAU,
+            (_, t) => t,
+        };
+        let a0 = vy.atan2(vx);
         Some(Circle { cx, cy, r, start_angle: a0, sweep })
     }
 
@@ -107,9 +107,17 @@ impl Arc {
         let segments = segments_for(c.r, c.sweep.abs(), tolerance);
         let mut out = Vec::with_capacity(segments + 1);
         out.push(self.start);
+        // Each point is start + (R(θ) − I)(start − centre): its error scales with the chord,
+        // not the radius, so huge, shallow arcs stay accurate.
+        let (sx, sy) = xy(self.start);
+        let (vx, vy) = (sx - c.cx, sy - c.cy);
         for i in 1..segments {
-            let a = c.start_angle + c.sweep * (i as f64 / segments as f64);
-            let p = Point::new(Nm::from_f64_nm(c.cx + c.r * a.cos())?, Nm::from_f64_nm(c.cy + c.r * a.sin())?);
+            let t = c.sweep * (i as f64 / segments as f64);
+            let (sin, half) = (t.sin(), (t / 2.0).sin());
+            let cos_m1 = -2.0 * half * half;
+            let x = sx + cos_m1 * vx - sin * vy;
+            let y = sy + sin * vx + cos_m1 * vy;
+            let p = Point::new(Nm::from_f64_nm(x)?, Nm::from_f64_nm(y)?);
             if out.last() != Some(&p) {
                 out.push(p);
             }
@@ -121,12 +129,16 @@ impl Arc {
     }
 }
 
+/// `p − q` in `i128`; cannot overflow for any `i64` inputs.
+fn diff(p: Point, q: Point) -> (i128, i128) {
+    (i128::from(p.x.0) - i128::from(q.x.0), i128::from(p.y.0) - i128::from(q.y.0))
+}
+
 /// `(b - a) × (c - a)` computed exactly, or `None` if it overflows (only possible outside the
 /// design range).
 pub(crate) fn orientation(a: Point, b: Point, c: Point) -> Option<i128> {
-    let d = |p: Point, q: Point| (i128::from(p.x.0) - i128::from(q.x.0), i128::from(p.y.0) - i128::from(q.y.0));
-    let (bx, by) = d(b, a);
-    let (cx, cy) = d(c, a);
+    let (bx, by) = diff(b, a);
+    let (cx, cy) = diff(c, a);
     bx.checked_mul(cy)?.checked_sub(by.checked_mul(cx)?)
 }
 
@@ -134,7 +146,9 @@ pub(crate) fn orientation(a: Point, b: Point, c: Point) -> Option<i128> {
 /// `tolerance`: the sagitta of each chord is at most the tolerance.
 pub(crate) fn segments_for(r: f64, sweep: f64, tolerance: Nm) -> usize {
     let tol = (tolerance.0.max(1)) as f64;
-    let step = if tol >= r { PI / 2.0 } else { 2.0 * (1.0 - tol / r).acos() };
+    // The chord angle whose sagitta equals the tolerance: 2·acos(1 − t/r), written as
+    // 4·asin(√(t/2r)) so it stays accurate when t/r is far below f64 precision.
+    let step = if tol >= r { PI / 2.0 } else { 4.0 * (tol / (2.0 * r)).sqrt().asin() };
     let n = if step.is_finite() && step > 0.0 { (sweep / step).ceil() } else { MAX_ARC_SEGMENTS as f64 };
     // A full circle needs at least a triangle; any arc at least one segment.
     let min = if sweep >= TAU - 1e-9 { 3.0 } else { 1.0 };
@@ -193,6 +207,33 @@ mod tests {
         let arc = Arc::new(p(0, 0), p(5, 5), p(10, 10));
         assert!(arc.circle().is_none());
         assert_eq!(arc.flatten(Nm(1)).expect("flatten"), vec![p(0, 0), p(10, 10)]);
+    }
+
+    #[test]
+    fn near_collinear_arc_is_not_turned_into_a_line() {
+        // The integer orientation is 1, but a float determinant of these coordinates cancels to
+        // zero. The mid point lies beyond the end, so this is almost a full turn of a circle far
+        // larger than the design range: an error, not a straight line.
+        let arc = Arc::new(p(0, 0), p(1_000_000_000, 1_000_000_001), p(999_999_999, 1_000_000_000));
+        assert!(arc.circle().is_some());
+        assert_eq!(arc.flatten(Nm(1_000)), Err(GeomError::OutOfRange));
+    }
+
+    #[test]
+    fn shallow_arcs_far_from_the_origin_stay_on_the_circle() {
+        let o = 9_000_000_000; // 9 m
+        // 2 mm chord, 1 nm sagitta: within a 1 nm tolerance it is its chord.
+        let flat = Arc::new(p(o, 0), p(o + 1_000_000, 1), p(o + 2_000_000, 0));
+        assert_eq!(flat.flatten(Nm(1)).expect("flatten"), vec![p(o, 0), p(o + 2_000_000, 0)]);
+        // 10 µm sagitta: several points, each within 1 nm (plus rounding) of the true circle.
+        let arc = Arc::new(p(o, 0), p(o + 1_000_000, 10_000), p(o + 2_000_000, 0));
+        let c = arc.circle().expect("circle");
+        let pts = arc.flatten(Nm(1)).expect("flatten");
+        assert!(pts.len() > 3);
+        for q in &pts {
+            let d = (q.x.0 as f64 - c.cx).hypot(q.y.0 as f64 - c.cy);
+            assert!((d - c.r).abs() <= 1.5, "{q:?} is {} nm off", d - c.r);
+        }
     }
 
     #[test]

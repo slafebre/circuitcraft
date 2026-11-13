@@ -49,22 +49,35 @@ fn from_int(p: IntPoint<i64>) -> Point {
     Point::new(Nm(p.x), Nm(p.y))
 }
 
-/// A ring for the engine, checked against the design range and turned the given way (outer
-/// rings counter-clockwise, holes clockwise). Rings with fewer than three points or no area are
-/// dropped.
+/// A ring for the engine, checked against the design range. Simple rings are turned the given
+/// way (outer rings counter-clockwise, holes clockwise). Degenerate rings, with fewer than three
+/// distinct points or all points on one line, are dropped. A self-intersecting ring whose signed
+/// area adds up to zero (a bow tie) still encloses area and is kept as it is.
 fn ring(points: &[Point], ccw: bool) -> Result<Option<IntContour<i64>>, GeomError> {
     for &p in points {
         check_point(p)?;
     }
-    let a = area2(points).ok_or(GeomError::OutOfRange)?;
-    if points.len() < 3 || a == 0 {
+    if is_degenerate(points)? {
         return Ok(None);
     }
+    let a = area2(points).ok_or(GeomError::OutOfRange)?;
     let mut out: IntContour<i64> = points.iter().map(|&p| to_int(p)).collect();
-    if (a > 0) != ccw {
+    if a != 0 && (a > 0) != ccw {
         out.reverse();
     }
     Ok(Some(out))
+}
+
+/// Whether a ring encloses nothing: fewer than three distinct points, or all on one line.
+fn is_degenerate(points: &[Point]) -> Result<bool, GeomError> {
+    let Some(&first) = points.first() else { return Ok(true) };
+    let Some(&second) = points.iter().find(|&&q| q != first) else { return Ok(true) };
+    for &q in points {
+        if crate::arc::orientation(first, second, q).ok_or(GeomError::OutOfRange)? != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn shapes(polys: &[Polygon]) -> Result<IntShapes<i64>, GeomError> {
@@ -82,15 +95,25 @@ fn shapes(polys: &[Polygon]) -> Result<IntShapes<i64>, GeomError> {
     Ok(out)
 }
 
-fn polygons(shapes: IntShapes<i64>) -> Vec<Polygon> {
-    shapes
-        .into_iter()
-        .filter_map(|shape| {
-            let mut rings = shape.into_iter().map(|c| c.into_iter().map(from_int).collect::<Vec<_>>());
-            let outer = rings.next()?;
-            Some(Polygon { outer, holes: rings.collect() })
-        })
-        .collect()
+/// Engine output back to polygons. Every point is checked: growing or stroking near the edge
+/// of the design range can produce points beyond it, which must not pass as valid geometry.
+fn polygons(shapes: IntShapes<i64>) -> Result<Vec<Polygon>, GeomError> {
+    let mut out = Vec::with_capacity(shapes.len());
+    for shape in shapes {
+        let mut rings = Vec::with_capacity(shape.len());
+        for contour in shape {
+            let ring: Vec<Point> = contour.into_iter().map(from_int).collect();
+            for &p in &ring {
+                check_point(p)?;
+            }
+            rings.push(ring);
+        }
+        let mut rings = rings.into_iter();
+        if let Some(outer) = rings.next() {
+            out.push(Polygon { outer, holes: rings.collect() });
+        }
+    }
+    Ok(out)
 }
 
 /// Combines two sets of polygons. Overlaps within each set are resolved with `fill`.
@@ -106,7 +129,7 @@ pub fn boolean(subject: &[Polygon], clip: &[Polygon], op: BoolOp, fill: FillRule
         FillRule::EvenOdd => IoFill::EvenOdd,
     };
     let (s, c) = (shapes(subject)?, shapes(clip)?);
-    Ok(polygons(Overlay::from_subj_and_clip(&s, &c).overlay(rule, fill)))
+    polygons(Overlay::from_subj_and_clip(&s, &c).overlay(rule, fill))
 }
 
 /// Merges overlapping polygons into clean, non-overlapping ones (union with nothing).
@@ -136,7 +159,7 @@ pub fn offset(polys: &[Polygon], distance: Nm, tolerance: Nm) -> Result<Vec<Poly
     let style = IntOutlineStyle::new(distance.0).line_join(round_join(distance, tolerance));
     clean.validate_outline(&style).map_err(|_| GeomError::OutOfRange)?;
     let result = clean.outline(&style).map_err(|_| GeomError::OutOfRange)?;
-    Ok(polygons(result))
+    polygons(result)
 }
 
 /// The area covered by drawing `path` with a round pen `width` wide: round ends and round corners,
@@ -165,7 +188,7 @@ pub fn stroke(path: &[Point], width: Nm, tolerance: Nm) -> Result<Vec<Polygon>, 
     }
     let style = IntStrokeStyle::new(width.0).line_join(join).start_cap(IntLineCap::Round(arc)).end_cap(IntLineCap::Round(arc));
     pts.validate_stroke(&style).map_err(|_| GeomError::OutOfRange)?;
-    Ok(polygons(pts.stroke(&style, false).map_err(|_| GeomError::OutOfRange)?))
+    polygons(pts.stroke(&style, false).map_err(|_| GeomError::OutOfRange)?)
 }
 
 #[cfg(test)]
@@ -253,6 +276,28 @@ mod tests {
     fn stroke_of_one_point_is_a_dot() {
         let r = stroke(&[p(0, 0)], Nm(2 * MM), Nm(100)).expect("dot");
         assert!((total_area_mm2(&r) - std::f64::consts::PI).abs() < 0.001);
+    }
+
+    #[test]
+    fn self_intersecting_ring_with_zero_net_area_is_kept() {
+        // A bow tie: its two lobes wind opposite ways, so the signed area is zero, but both
+        // lobes are filled under either fill rule (1 mm² each).
+        let bow = [Polygon::new(vec![p(0, 0), p(2 * MM, 2 * MM), p(0, 2 * MM), p(2 * MM, 0)])];
+        for fill in [FillRule::EvenOdd, FillRule::NonZero] {
+            let r = boolean(&bow, &[], BoolOp::Union, fill).expect("boolean");
+            assert!((total_area_mm2(&r) - 2.0).abs() < 1e-9, "{fill:?}: {}", total_area_mm2(&r));
+        }
+    }
+
+    #[test]
+    fn results_outside_the_design_range_are_errors() {
+        let max = MAX_ABS;
+        // A square touching the edge of the design range, grown past it.
+        let edge = [square(max - MM, 0, MM)];
+        assert_eq!(offset(&edge, Nm(MM), TOL), Err(GeomError::OutOfRange));
+        assert_eq!(stroke(&[p(max - MM, 0), p(max, 0)], Nm(MM), TOL), Err(GeomError::OutOfRange));
+        // Shrinking it is fine.
+        assert!(offset(&edge, Nm(-1_000), TOL).is_ok());
     }
 
     #[test]
