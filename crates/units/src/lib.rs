@@ -49,7 +49,9 @@ impl Nm {
         Self::from_f64_nm(mil * NM_PER_MIL as f64)
     }
 
-    fn from_f64_nm(nm: f64) -> Result<Nm, UnitError> {
+    /// Converts a length in nanometres given as a float (from geometry maths or a file), rounding
+    /// to the nearest nanometre. NaN, infinities and values outside the design range are errors.
+    pub fn from_f64_nm(nm: f64) -> Result<Nm, UnitError> {
         if !nm.is_finite() {
             return Err(UnitError::NotFinite(nm));
         }

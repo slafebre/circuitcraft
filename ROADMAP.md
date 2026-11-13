@@ -46,7 +46,7 @@ Proves the workspace, the data model, the renderer and the agent interface on re
 | Deliverable | Size |
 |---|---|
 | ✅ Workspace scaffold: crate layers, `cargo xtask ci` (fmt, clippy with deny lints, tests, layers, assets, wasm), licences, `AGENTS.md` with the house rules, `ATTRIBUTION.md`, command registry, CLI (`commands`, `exec`, `info`, `mcp`), MCP server, empty desktop and web shells | S |
-| `units` and `geom`: `i64` nanometre coordinates, lines, arcs, polygons with arcs, booleans and offsets (via a permissively licensed polygon library) | M |
+| ✅ `units` and `geom`: `i64` nanometre coordinates, lines, arcs, polygons with arcs, booleans, offsets and track strokes (on `i_overlay`) | M |
 | `model` v0: board outline, layer stack, pads, tracks, arcs, vias, copper polygons, text, footprints, nets; copy-on-write store with undo | M |
 | Native format v0: read and write, deterministic, with a version field | S |
 | EAGLE `.brd` and KiCad board import, read-only | M |
@@ -182,3 +182,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-13 | Workspace scaffold landed; stage moved to 0.1 in progress |
 | 2026-11-13 | egui licence exceptions accepted; licence check added to CI |
 | 2026-11-13 | 0.1 decisions settled: name, polygon library, EAGLE reader terms, test corpus, native format, DCO sign-off |
+| 2026-11-13 | Geometry landed: arcs, contours, polygon booleans, offsets and track strokes |
