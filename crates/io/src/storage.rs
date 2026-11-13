@@ -158,6 +158,12 @@ impl Storage for DiskStorage {
     /// - The file is replaced, not rewritten: a file that is a symlink becomes a regular file,
     ///   and the new file gets default permissions.
     fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        // A folder is never replaced by a file, and neither is a link that leads to one.
+        // Renaming onto a folder is refused on Unix; asking first gives the same answer where it
+        // might not be.
+        if matches!(self.kind(path), Ok(Kind::Folder)) {
+            return Err(Error::new(ErrorKind::IsADirectory, "a folder is in the way"));
+        }
         // 128 random bits from the system (an item id is just that): a name nothing else has, and
         // one that doesn't depend on the target's name, so a long file name still fits.
         let tag = circuitcraft_model::ItemId::random().map_err(|e| Error::other(e.to_string()))?.as_u128();
@@ -190,8 +196,17 @@ impl Storage for DiskStorage {
     }
 
     fn files(&self, folder: &Path) -> Result<Vec<PathBuf>> {
+        // Asked first, so that listing a file is refused on every system: what listing one
+        // gives differs between them.
+        match self.kind(folder) {
+            Ok(Kind::Folder) => {}
+            Ok(_) => return Err(Error::new(ErrorKind::NotADirectory, "not a folder")),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
         let entries = match std::fs::read_dir(folder) {
             Ok(entries) => entries,
+            // Removed since it was asked about: a folder that isn't there has no files.
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
@@ -268,19 +283,28 @@ impl MemoryStorage {
     }
 }
 
-/// `path` from `/`, with `.` and `..` resolved by name.
+/// `path` from `/`, with `.` and `..` resolved by name. The names are joined with `/` on every
+/// system, and never pushed onto a path: on Windows, pushing a name that reads as a drive
+/// (`C:`) would replace everything before it.
 fn rooted(path: &Path) -> PathBuf {
-    let mut out = PathBuf::from("/");
+    let mut names = Vec::new();
     for part in path.components() {
         match part {
-            std::path::Component::Normal(name) => out.push(name),
+            std::path::Component::Normal(name) => names.push(name),
             std::path::Component::ParentDir => {
-                out.pop();
+                names.pop();
             }
             _ => {}
         }
     }
-    out
+    let mut out = std::ffi::OsString::from("/");
+    for (i, name) in names.into_iter().enumerate() {
+        if i > 0 {
+            out.push("/");
+        }
+        out.push(name);
+    }
+    PathBuf::from(out)
 }
 
 impl Storage for MemoryStorage {
@@ -392,6 +416,7 @@ mod tests {
         assert!(s.read(&folder, 10).is_err(), "a folder is not read");
         assert!(s.read(&folder.join("missing.txt"), 10).is_err());
         assert!(s.write(&folder.join("sub"), b"x").is_err(), "a folder is not replaced by a file");
+        assert!(s.write(&folder.join("sub/below"), b"x").is_err(), "nor is an empty one");
         // A file is not a folder: nothing is written or made under it, and it holds no files.
         assert!(s.write(&folder.join("b.txt/c.txt"), b"x").is_err());
         assert!(s.create_folder(&folder.join("b.txt/sub")).is_err());
@@ -403,7 +428,9 @@ mod tests {
         s.remove(&file).expect("removing what isn't there is fine");
         assert!(s.kind(&file).is_err());
         assert_eq!(s.files(&folder).expect("files"), [folder.join("b.txt")]);
-        assert!(s.absolute(Path::new("x/y.txt")).is_ok_and(|p| p.is_absolute() && p.ends_with("x/y.txt")));
+        // From the root: on Windows a path in memory has a root and no drive, which
+        // `is_absolute` there doesn't count as absolute.
+        assert!(s.absolute(Path::new("x/y.txt")).is_ok_and(|p| p.has_root() && p.ends_with("x/y.txt")));
     }
 
     #[test]
@@ -430,6 +457,13 @@ mod tests {
         assert_eq!(memory.read(Path::new("/x/../../rel.txt"), 9).ok().as_deref(), Some(&b"1"[..]));
         assert_eq!(memory.kind(Path::new("/")).ok(), Some(Kind::Folder));
         assert!(memory.create_folder(Path::new("/rel.txt/sub")).is_err(), "a file is in the way");
+        // A name that reads as a drive on Windows is a name like any other when it is not the
+        // first: what comes before it stays, and the path stays under the root.
+        for drive in ["/x/C:/y", "/x/C:y"] {
+            assert!(memory.absolute(Path::new(drive)).is_ok_and(|p| p.has_root() && p.starts_with("/x")), "{drive}");
+        }
+        assert!(memory.absolute(Path::new("C:/x/y")).is_ok_and(|p| p.has_root() && p.ends_with("x/y")));
+        assert_eq!(memory.absolute(Path::new("a/./b/../c")).ok(), Some(PathBuf::from("/a/c")));
         // A folder with a similar name is another folder.
         memory.write(Path::new("/a/bc/x.txt"), b"1").expect("write");
         assert!(memory.kind(Path::new("/a/b")).is_err());

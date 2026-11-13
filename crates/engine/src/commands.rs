@@ -863,6 +863,17 @@ mod tests {
         Session::with_storage(Box::new(DiskStorage::with_recovery(None)))
     }
 
+    /// A path that a command reported as text, to compare as a path: on Windows the parts of a
+    /// path in memory are joined with `\`, so `/work\Blinky` there is `/work/Blinky` here.
+    fn path(reported: &Value) -> Option<PathBuf> {
+        reported.as_str().map(PathBuf::from)
+    }
+
+    /// The same for the path a test expects.
+    fn at(path: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(path))
+    }
+
     /// A session on files in `memory`, which other sessions can share.
     fn sharing(memory: &Arc<MemoryStorage>) -> Session {
         Session::with_storage(Box::new(memory.clone()))
@@ -1193,8 +1204,8 @@ mod tests {
         assert!(s.modified() && info(&mut s)["documents"][0]["modified"] == true);
         s.execute("file.save", &json!({ "path": "/work/Blinky" })).expect("save");
         let saved = info(&mut s);
-        assert_eq!((&saved["folder"], &saved["project"]), (&json!("/work/Blinky"), &json!("/work/Blinky/Blinky.ccproj")));
-        assert_eq!((&saved["documents"][0]["file"], &saved["documents"][0]["modified"]), (&json!("/work/Blinky/Blinky.ccpcb"), &json!(false)));
+        assert_eq!((path(&saved["folder"]), path(&saved["project"])), (at("/work/Blinky"), at("/work/Blinky/Blinky.ccproj")));
+        assert_eq!((path(&saved["documents"][0]["file"]), &saved["documents"][0]["modified"]), (at("/work/Blinky/Blinky.ccpcb"), &json!(false)));
         // Undo changes the board away from its files; redo brings it back to them.
         s.execute("edit.undo", &Value::Null).expect("undo");
         assert!(s.modified());
@@ -1280,8 +1291,11 @@ mod tests {
         later.execute("net.add", &json!({ "name": "VCC" })).expect("net");
         let id = autosave(&mut later)["id"].as_str().expect("id").to_owned();
         let mut third = sharing(&files);
-        let listed = json!({ "id": id, "name": "Blinky", "from": "/work/Blinky/Blinky.ccpcb", "problem": null });
-        assert_eq!(recoverable(&mut third), [listed]);
+        // Where it belongs is compared as a path, and everything else exactly.
+        let mut listed = recoverable(&mut third);
+        let from = listed.first_mut().map(|only| only["from"].take());
+        assert_eq!(listed, [json!({ "id": id, "name": "Blinky", "from": null, "problem": null })]);
+        assert_eq!(from.as_ref().and_then(path), at("/work/Blinky/Blinky.ccpcb"));
         later.execute("file.save", &Value::Null).expect("save");
         assert!(recoverable(&mut third).is_empty());
         assert_eq!(files.snapshot().len(), 2);
@@ -1290,7 +1304,7 @@ mod tests {
     #[test]
     fn a_recovered_board_goes_on_saying_where_it_belongs() {
         let files = Arc::new(MemoryStorage::with_recovery());
-        let from = |s: &mut Session| recoverable(s).iter().map(|e| e["from"].clone()).collect::<Vec<_>>();
+        let from = |s: &mut Session| recoverable(s).iter().map(|e| path(&e["from"])).collect::<Vec<_>>();
         // Unsaved work on a board that has files, left by a session that ended.
         let mut first = sharing(&files);
         first.execute("file.save", &json!({ "path": "/work/Blinky" })).expect("save");
@@ -1298,15 +1312,16 @@ mod tests {
         first.execute("file.autosave", &Value::Null).expect("autosave");
         drop(first);
         let mut watching = sharing(&files);
-        assert_eq!(from(&mut watching), [json!("/work/Blinky/Blinky.ccpcb")]);
+        assert_eq!(from(&mut watching), [at("/work/Blinky/Blinky.ccpcb")]);
         // A second session recovers it, works on and ends as well. The recovered board had no
         // files, yet the copy it leaves still says where the board belongs.
         let mut second = sharing(&files);
-        assert_eq!(second.execute("recovery.open", &Value::Null).expect("recover")["from"], "/work/Blinky/Blinky.ccpcb");
+        let recovered = second.execute("recovery.open", &Value::Null).expect("recover");
+        assert_eq!(path(&recovered["from"]), at("/work/Blinky/Blinky.ccpcb"));
         second.execute("net.add", &json!({ "name": "MORE" })).expect("net");
         assert_eq!(second.execute("file.autosave", &Value::Null).expect("autosave")["written"], true);
         drop(second);
-        assert_eq!(from(&mut watching), [json!("/work/Blinky/Blinky.ccpcb")]);
+        assert_eq!(from(&mut watching), [at("/work/Blinky/Blinky.ccpcb")]);
     }
 
     #[test]
