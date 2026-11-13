@@ -407,8 +407,8 @@ fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circuitcraft_model::TrackPath;
     use circuitcraft_model::layer_ids::TOP_COPPER;
+    use circuitcraft_model::{Footprint, Hole, Opening, Pad, PadShape, Rotation, Side, Slot, TrackPath};
     use circuitcraft_units::{Nm, Point};
 
     fn blinky() -> Board {
@@ -416,7 +416,31 @@ mod tests {
         let gnd = b.add_net("GND").expect("net");
         let path = TrackPath::Line { from: Point::new(Nm(0), Nm(0)), to: Point::new(Nm(1_000_000), Nm(0)) };
         b.add_track(TOP_COPPER, Nm(250_000), path, Some(gnd)).expect("track");
-        b.add_via(Point::new(Nm(1_000_000), Nm(0)), Nm(600_000), Nm(300_000), Some(gnd)).expect("via");
+        let via = b.add_via(Point::new(Nm(1_000_000), Nm(0)), Nm(600_000), Nm(300_000), Some(gnd)).expect("via");
+        if let Some(via) = b.vias.get_mut(via) {
+            via.top_mask = Opening::Closed;
+            via.bottom_mask = Opening::Open { by: None };
+        }
+        // A connector: a shell pin around a plated slot, a mounting hole and a surface-mount pad.
+        let slot = Hole { slot: Some(Slot { length: Nm(1_700_000), rotation: Rotation(90_000) }), ..Hole::round(Nm(600_000), true) };
+        let mut shell = Pad::through_hole("S1", Point::ORIGIN, PadShape::Oval { width: Nm(1_000_000), height: Nm(2_100_000) }, slot);
+        shell.net = Some(gnd);
+        let mounting = Pad::bare_hole(Point::new(Nm(4_000_000), Nm(0)), Hole::round(Nm(650_000), false));
+        let mut smd = Pad::smd("A1", Point::new(Nm(2_000_000), Nm(0)), PadShape::Rect { width: Nm(300_000), height: Nm(1_000_000) });
+        if let Some(front) = &mut smd.front {
+            front.paste = Opening::Open { by: Some(Nm(-25_000)) };
+        }
+        let connector = Footprint {
+            id: b.fresh_id().expect("id"),
+            reference: "J1".to_owned(),
+            value: "USB-C".to_owned(),
+            position: Point::new(Nm(5_000_000), Nm(5_000_000)),
+            rotation: Rotation(0),
+            side: Side::Top,
+            pads: vec![shell, mounting, smd],
+            graphics: Vec::new(),
+        };
+        b.footprints.insert(connector).expect("footprint");
         b
     }
 
