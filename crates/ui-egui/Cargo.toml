@@ -17,3 +17,6 @@ circuitcraft-model = { workspace = true }
 circuitcraft-render = { workspace = true }
 egui = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+circuitcraft-io = { workspace = true }

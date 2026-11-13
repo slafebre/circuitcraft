@@ -12,9 +12,9 @@
 //! everything and nothing else: a field that is missing or that this build doesn't know is
 //! refused, never guessed at or dropped on the next save.
 
+use crate::storage::{Kind, Storage};
 use circuitcraft_model::{Board, ModelError};
 use serde::{Deserialize, Serialize};
-use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 /// The format version written by this build, and the newest it reads.
@@ -31,6 +31,12 @@ pub const BOARD_EXT: &str = "ccpcb";
 
 /// The project file extension.
 pub const PROJECT_EXT: &str = "ccproj";
+
+/// The `format` value of a recovery file.
+pub const RECOVERY_FORMAT: &str = "circuitcraft.recovery";
+
+/// The recovery file extension.
+pub const RECOVERY_EXT: &str = "ccrecovery";
 
 /// The largest file read, in bytes. A board this size would hold millions of items.
 pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -52,7 +58,7 @@ pub enum NativeError {
     /// The text is not the expected kind of file.
     #[error("not a CircuitCraft {expected} file{found}")]
     WrongFormat {
-        /// `board` or `project`.
+        /// `board`, `project` or `recovery`.
         expected: &'static str,
         /// What the file says it is, if anything (`, it says "…"`).
         found: String,
@@ -117,6 +123,55 @@ struct ProjectIn {
     version: u64,
     name: String,
     board: String,
+}
+
+/// A recovery file: a board with unsaved work, and where it came from.
+#[derive(Serialize)]
+struct RecoveryOut<'a> {
+    format: &'static str,
+    version: u32,
+    from: Option<&'a str>,
+    board: &'a Board,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryIn {
+    format: String,
+    version: u64,
+    #[serde(deserialize_with = "written")]
+    from: Option<String>,
+    board: Board,
+}
+
+/// A field that may be `null` but must be written.
+fn written<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    Option::deserialize(d)
+}
+
+/// What a list of recovery files shows of one, read without building its board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryHeader {
+    /// The board's name.
+    pub name: String,
+    /// The board file the board was last opened from or saved to, as text for people to read;
+    /// `None` for a board that was never saved.
+    pub from: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RecoveryPeek {
+    format: String,
+    version: u64,
+    #[serde(deserialize_with = "written")]
+    from: Option<String>,
+    board: BoardPeek,
+}
+
+/// The name of a board; the rest of it is skipped as it is read.
+#[derive(Deserialize)]
+struct BoardPeek {
+    name: String,
 }
 
 /// Just the header, read when a full parse fails, to say why in the user's terms. It skips
@@ -271,6 +326,36 @@ pub fn read_board(text: &str) -> Result<Board, NativeError> {
     Ok(file.board)
 }
 
+/// A board with unsaved work as `.ccrecovery` text. `from` is the board file it belongs to, for
+/// people to read: nothing is ever written there because a recovery file says so.
+pub fn write_recovery(board: &Board, from: Option<&Path>) -> Result<String, NativeError> {
+    let from = from.map(|f| f.to_string_lossy());
+    pretty(&RecoveryOut { format: RECOVERY_FORMAT, version: FORMAT_VERSION, from: from.as_deref(), board })
+}
+
+/// The board in a recovery file, checked with [`Board::validate`], and where it came from.
+pub fn read_recovery(text: &str) -> Result<(Board, Option<String>), NativeError> {
+    let file: RecoveryIn = parse(text, RECOVERY_FORMAT, "recovery")?;
+    check_header(&file.format, file.version, RECOVERY_FORMAT, "recovery")?;
+    file.board.validate()?;
+    Ok((file.board, file.from.map(|from| clip(&from))))
+}
+
+/// The longest `from` passed on, in characters: far longer than a path, far shorter than a file.
+const MAX_FROM_CHARS: usize = 4_096;
+
+/// Text from a file, cut to a length that is safe to show and to send back.
+fn clip(text: &str) -> String {
+    text.chars().take(MAX_FROM_CHARS).collect()
+}
+
+/// What a recovery file says it holds, without reading its board in full or checking it.
+pub fn peek_recovery(text: &str) -> Result<RecoveryHeader, NativeError> {
+    let file: RecoveryPeek = parse(text, RECOVERY_FORMAT, "recovery")?;
+    check_header(&file.format, file.version, RECOVERY_FORMAT, "recovery")?;
+    Ok(RecoveryHeader { name: file.board.name.chars().take(circuitcraft_model::MAX_NAME_CHARS).collect(), from: file.from.map(|from| clip(&from)) })
+}
+
 /// A project as `.ccproj` text.
 pub fn write_project(project: &Project) -> Result<String, NativeError> {
     pretty(&ProjectOut { format: PROJECT_FORMAT, version: FORMAT_VERSION, project })
@@ -332,63 +417,23 @@ fn check_board_name(name: &str) -> Result<(), NativeError> {
 /// Reads a whole regular file as text, refusing one larger than [`MAX_FILE_BYTES`] without
 /// reading it all. Anything else (a folder, a pipe, a device such as `/dev/stdin`) is refused
 /// before it is opened, since opening or reading one can block forever.
-pub fn read_text(path: &Path) -> Result<String, NativeError> {
+pub fn read_text(storage: &dyn Storage, path: &Path) -> Result<String, NativeError> {
     let io = |source| NativeError::Io { path: path.to_owned(), source };
-    let meta = std::fs::metadata(path).map_err(io)?;
-    if !meta.is_file() {
-        return Err(NativeError::NotAFile(path.to_owned()));
+    match storage.kind(path).map_err(io)? {
+        Kind::File(len) if len > MAX_FILE_BYTES => return Err(NativeError::TooLarge(path.to_owned())),
+        Kind::File(_) => {}
+        Kind::Folder | Kind::Other => return Err(NativeError::NotAFile(path.to_owned())),
     }
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(NativeError::TooLarge(path.to_owned()));
-    }
-    let file = std::fs::File::open(path).map_err(io)?;
-    // The size from the metadata sets the first allocation; `take` still bounds a file that grows.
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0).saturating_add(1));
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).map_err(io)?;
+    // One byte more than is accepted, so a file that grew since it was measured is still caught.
+    let bytes = storage.read(path, MAX_FILE_BYTES + 1).map_err(io)?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(NativeError::TooLarge(path.to_owned()));
     }
     String::from_utf8(bytes).map_err(|_| NativeError::Malformed(format!("{}: not UTF-8 text", path.display())))
 }
 
-/// Writes a file by way of a temporary file in the same folder, which then replaces it:
-///
-/// - A crash, a full disk or a failed write leaves the old file untouched, and the temporary file
-///   is removed on every error path.
-/// - The temporary file is created new (`create_new` refuses any existing path, symlinks
-///   included) with a random name, so a link planted in a project folder can't redirect the
-///   write, and two saves at once don't share a file.
-/// - The data is flushed to disk before the rename (on macOS `sync_all` is a full flush). On Unix
-///   the folder is flushed after it too, so a power cut leaves the old file or the new one; other
-///   systems don't offer that flush, so the rename itself may be lost there.
-/// - The file is replaced, not rewritten: a board file that is a symlink becomes a regular file,
-///   and the new file gets default permissions.
-fn write_atomic(path: &Path, text: &str) -> Result<(), NativeError> {
-    let io = |source| NativeError::Io { path: path.to_owned(), source };
-    // 128 random bits from the system (an item id is just that): a name nothing else has, and
-    // one that doesn't depend on the target's name, so a long file name still fits.
-    let tag = circuitcraft_model::ItemId::random().map_err(|e| NativeError::Project(format!("{}: {e}", path.display())))?.as_u128();
-    let temp = path.with_file_name(format!(".circuitcraft-{tag:032x}.saving"));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(io)?;
-    let written = file.write_all(text.as_bytes()).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(io(e));
-    }
-    sync_folder(path);
-    Ok(())
-}
-
-/// Flushes a folder's entries to disk after a rename, on Unix (other systems can't). A failure
-/// here doesn't undo a save that has already happened, so it is ignored.
-fn sync_folder(path: &Path) {
-    #[cfg(unix)]
-    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
-        let _ = std::fs::File::open(folder).and_then(|f| f.sync_all());
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+fn write_text(storage: &dyn Storage, path: &Path, text: &str) -> Result<(), NativeError> {
+    storage.write(path, text.as_bytes()).map_err(|source| NativeError::Io { path: path.to_owned(), source })
 }
 
 /// Where an open document's files are, so that saving writes back to exactly those files. Only
@@ -418,8 +463,8 @@ impl ProjectPaths {
 
 /// An absolute version of `path` (without resolving links), so a project opened by a relative
 /// path still knows its folder.
-fn absolute(path: &Path) -> Result<PathBuf, NativeError> {
-    std::path::absolute(path).map_err(|source| NativeError::Io { path: path.to_owned(), source })
+fn absolute(storage: &dyn Storage, path: &Path) -> Result<PathBuf, NativeError> {
+    storage.absolute(path).map_err(|source| NativeError::Io { path: path.to_owned(), source })
 }
 
 /// The file name of `path`, if it has one that is valid UTF-8. Strict on purpose: a lossy
@@ -437,9 +482,9 @@ fn file_name(path: &Path) -> Option<&str> {
 /// - A folder with several projects is always refused.
 ///
 /// Saving back to the files a board came from goes through [`save`] instead.
-pub fn save_project(folder: &Path, board: &Board, overwrite: bool) -> Result<ProjectPaths, NativeError> {
-    let folder = absolute(folder)?;
-    let project = match project_files(&folder)?.as_slice() {
+pub fn save_project(storage: &dyn Storage, folder: &Path, board: &Board, overwrite: bool) -> Result<ProjectPaths, NativeError> {
+    let folder = absolute(storage, folder)?;
+    let project = match project_files(storage, &folder)?.as_slice() {
         [] => {
             let stem = file_name(&folder)
                 .filter(|n| !n.trim().is_empty())
@@ -453,17 +498,17 @@ pub fn save_project(folder: &Path, board: &Board, overwrite: bool) -> Result<Pro
     let paths = ProjectPaths { board: project.with_extension(BOARD_EXT), project: Some(project) };
     let board_name = file_name(&paths.board).ok_or_else(|| NativeError::Project(format!("{}: not a UTF-8 file name", paths.board.display())))?;
     check_board_name(board_name)?;
-    if !overwrite && paths.board.exists() {
+    if !overwrite && storage.kind(&paths.board).is_ok() {
         return Err(NativeError::WouldOverwrite(paths.board));
     }
-    std::fs::create_dir_all(&folder).map_err(|source| NativeError::Io { path: folder.clone(), source })?;
-    save(&paths, board)?;
+    storage.create_folder(&folder).map_err(|source| NativeError::Io { path: folder.clone(), source })?;
+    save(storage, &paths, board)?;
     Ok(paths)
 }
 
 /// Saves a board back to the files it was opened from or last saved to: the board file, and the
 /// project file when there is one.
-pub fn save(paths: &ProjectPaths, board: &Board) -> Result<(), NativeError> {
+pub fn save(storage: &dyn Storage, paths: &ProjectPaths, board: &Board) -> Result<(), NativeError> {
     // Both texts first, so nothing is written if either can't be made.
     let project = match &paths.project {
         Some(file) => {
@@ -475,59 +520,45 @@ pub fn save(paths: &ProjectPaths, board: &Board) -> Result<(), NativeError> {
         None => None,
     };
     // The board first: a project file never names a board that isn't there.
-    write_atomic(&paths.board, &write_board(board)?)?;
+    write_text(storage, &paths.board, &write_board(board)?)?;
     if let Some((file, text)) = project {
-        write_atomic(file, &text)?;
+        write_text(storage, file, &text)?;
     }
     Ok(())
 }
 
 /// Opens a project folder, a `.ccproj` project file or a `.ccpcb` board file, and returns its
 /// board and the files it came from.
-pub fn open(path: &Path) -> Result<(Board, ProjectPaths), NativeError> {
-    let path = absolute(path)?;
-    let meta = std::fs::metadata(&path).map_err(|source| NativeError::Io { path: path.clone(), source })?;
-    let project_file = if meta.is_dir() {
-        find_project_file(&path)?
+pub fn open(storage: &dyn Storage, path: &Path) -> Result<(Board, ProjectPaths), NativeError> {
+    let path = absolute(storage, path)?;
+    let kind = storage.kind(&path).map_err(|source| NativeError::Io { path: path.clone(), source })?;
+    let project_file = if kind == Kind::Folder {
+        find_project_file(storage, &path)?
     } else if path.extension().is_some_and(|e| e == BOARD_EXT) {
-        let board = read_board(&read_text(&path)?)?;
+        let board = read_board(&read_text(storage, &path)?)?;
         return Ok((board, ProjectPaths { project: None, board: path }));
     } else {
         path
     };
-    let project = read_project(&read_text(&project_file)?)?;
+    let project = read_project(&read_text(storage, &project_file)?)?;
     let board_file = project_file.with_file_name(&project.board);
-    let board = read_board(&read_text(&board_file)?)?;
+    let board = read_board(&read_text(storage, &board_file)?)?;
     Ok((board, ProjectPaths { project: Some(project_file), board: board_file }))
 }
 
 /// The project files in a folder: regular `.ccproj` files whose names don't start with a dot, so
 /// hidden files (such as the `._` files macOS leaves on other file systems) are ignored. A folder
 /// that doesn't exist has none.
-fn project_files(folder: &Path) -> Result<Vec<PathBuf>, NativeError> {
-    let io = |source| NativeError::Io { path: folder.to_owned(), source };
-    let entries = match std::fs::read_dir(folder) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io(e)),
-    };
-    let mut found = Vec::new();
-    // Bounded: a folder with a huge number of entries is not a project folder.
-    for entry in entries.take(100_000) {
-        let path = entry.map_err(io)?.path();
-        // Raw bytes, so a file whose name isn't UTF-8 still counts (and is then refused by name).
-        let hidden = path.file_name().is_none_or(|n| n.as_encoded_bytes().starts_with(b"."));
-        if !hidden && path.extension().is_some_and(|e| e == PROJECT_EXT) && path.is_file() {
-            found.push(path);
-        }
-    }
-    found.sort();
-    Ok(found)
+fn project_files(storage: &dyn Storage, folder: &Path) -> Result<Vec<PathBuf>, NativeError> {
+    let files = storage.files(folder).map_err(|source| NativeError::Io { path: folder.to_owned(), source })?;
+    // Raw bytes, so a file whose name isn't UTF-8 still counts (and is then refused by name).
+    let hidden = |path: &PathBuf| path.file_name().is_none_or(|n| n.as_encoded_bytes().starts_with(b"."));
+    Ok(files.into_iter().filter(|path| !hidden(path) && path.extension().is_some_and(|e| e == PROJECT_EXT)).collect())
 }
 
 /// The one project file in a folder.
-fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
-    match project_files(folder)?.as_slice() {
+fn find_project_file(storage: &dyn Storage, folder: &Path) -> Result<PathBuf, NativeError> {
+    match project_files(storage, folder)?.as_slice() {
         [one] => Ok(one.clone()),
         [] => Err(NativeError::Project(format!("{}: no .{PROJECT_EXT} project file in this folder", folder.display()))),
         many => Err(NativeError::Project(format!("{}: {} project files in this folder; open one of them", folder.display(), many.len()))),
@@ -537,6 +568,10 @@ fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{DiskStorage, MemoryStorage};
+
+    /// The disk, for the tests that are about real files.
+    static DISK: DiskStorage = DiskStorage::with_recovery(None);
     use circuitcraft_geom::{Contour, Polygon, Rect};
     use circuitcraft_model::layer_ids::{TOP_COPPER, TOP_FABRICATION, TOP_SILK};
     use circuitcraft_model::{
@@ -915,35 +950,56 @@ mod tests {
         let dir = TempDir::new("native");
         let folder = dir.0.join("Blinky");
         let b = blinky();
-        let paths = save_project(&folder, &b, false).expect("save");
+        let paths = save_project(&DISK, &folder, &b, false).expect("save");
         assert_eq!(paths.project(), Some(folder.join("Blinky.ccproj").as_path()));
         assert_eq!(paths.board(), folder.join("Blinky.ccpcb"));
         assert_eq!(paths.folder(), folder);
         let first = std::fs::read(paths.board()).expect("board file");
         for path in [&folder, &folder.join("Blinky.ccproj")] {
-            let (back, at) = open(path).expect("open");
+            let (back, at) = open(&DISK, path).expect("open");
             assert_eq!(back, b);
             assert_eq!(at, paths);
         }
-        save(&paths, &b).expect("save again");
+        save(&DISK, &paths, &b).expect("save again");
         assert_eq!(std::fs::read(paths.board()).expect("board file"), first, "re-save must be byte-identical");
         assert_eq!(leftover_temp_files(&folder), 0, "no temporary files left behind");
+    }
+
+    #[test]
+    fn a_project_is_saved_and_opened_in_memory_as_on_disk() {
+        let memory = MemoryStorage::default();
+        let b = blinky();
+        let paths = save_project(&memory, Path::new("work/Blinky"), &b, false).expect("save");
+        assert_eq!((paths.project(), paths.board()), (Some(Path::new("/work/Blinky/Blinky.ccproj")), Path::new("/work/Blinky/Blinky.ccpcb")));
+        for path in ["/work/Blinky", "work/Blinky/Blinky.ccproj", "/work/Blinky/Blinky.ccpcb"] {
+            assert_eq!(open(&memory, Path::new(path)).expect("open").0, b, "{path}");
+        }
+        // The bytes are the ones the disk gets.
+        let dir = TempDir::new("native-memory");
+        let on_disk = save_project(&DISK, &dir.0.join("Blinky"), &b, false).expect("save");
+        let held = memory.snapshot();
+        assert_eq!(held.get(paths.board()), std::fs::read(on_disk.board()).ok().as_ref());
+        assert_eq!(held.len(), 2, "a board file and a project file");
+        // The same rules: no second project in a folder, a missing file is an error.
+        assert!(matches!(save_project(&memory, Path::new("/work/Blinky"), &b, false), Err(NativeError::WouldOverwrite(_))));
+        assert!(matches!(open(&memory, Path::new("/nowhere")), Err(NativeError::Io { .. })));
+        assert!(matches!(open(&memory, Path::new("/work")), Err(NativeError::Project(_))), "a folder without a project");
     }
 
     #[test]
     fn saving_goes_back_to_the_files_that_were_opened() {
         let dir = TempDir::new("native-renamed");
         let old = dir.0.join("Blinky2");
-        save_project(&old, &blinky(), false).expect("save");
+        save_project(&DISK, &old, &blinky(), false).expect("save");
         // The folder is renamed (or cloned under another name) after saving.
         let renamed = dir.0.join("my-board");
         std::fs::rename(&old, &renamed).expect("rename");
-        let (mut b, paths) = open(&renamed).expect("open");
+        let (mut b, paths) = open(&DISK, &renamed).expect("open");
         assert_eq!(paths.project(), Some(renamed.join("Blinky2.ccproj").as_path()));
         b.add_net("VCC").expect("edit");
-        save(&paths, &b).expect("save");
+        save(&DISK, &paths, &b).expect("save");
         assert!(!renamed.join("my-board.ccproj").exists() && !renamed.join("my-board.ccpcb").exists(), "no second project");
-        let (back, _) = open(&renamed).expect("still opens");
+        let (back, _) = open(&DISK, &renamed).expect("still opens");
         assert!(back.net_by_name("VCC").is_some(), "the edit is in the opened files");
     }
 
@@ -953,13 +1009,13 @@ mod tests {
         std::fs::create_dir_all(&dir.0).expect("dir");
         let file = dir.0.join("Blinky.ccpcb");
         std::fs::write(&file, write_board(&blinky()).expect("write")).expect("write");
-        let (mut b, paths) = open(&file).expect("open");
+        let (mut b, paths) = open(&DISK, &file).expect("open");
         assert_eq!((paths.project(), paths.board(), paths.folder()), (None, file.as_path(), dir.0.as_path()));
         b.add_net("VCC").expect("edit");
-        save(&paths, &b).expect("save");
+        save(&DISK, &paths, &b).expect("save");
         let names: Vec<_> = std::fs::read_dir(&dir.0).expect("dir").filter_map(Result::ok).map(|e| e.file_name()).collect();
         assert_eq!(names, ["Blinky.ccpcb"], "nothing written beside it");
-        assert_eq!(open(&file).expect("open").0, b);
+        assert_eq!(open(&DISK, &file).expect("open").0, b);
     }
 
     /// Linux allows file names that aren't UTF-8 (macOS refuses them, so this runs on Linux only).
@@ -971,8 +1027,8 @@ mod tests {
         let folder = dir.0.join("P");
         std::fs::create_dir_all(&folder).expect("dir");
         std::fs::write(folder.join(std::ffi::OsStr::from_bytes(b"\xff.ccproj")), "{}").expect("write");
-        assert!(matches!(save_project(&folder, &blinky(), true), Err(NativeError::Project(_))));
-        assert!(matches!(save_project(&folder, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
+        assert!(matches!(save_project(&DISK, &folder, &blinky(), true), Err(NativeError::Project(_))));
+        assert!(matches!(save_project(&DISK, &folder, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
     }
 
     #[test]
@@ -982,8 +1038,8 @@ mod tests {
         // 249 + ".ccpcb" = 255 bytes, the longest name most file systems allow.
         let file = dir.0.join(format!("{}.ccpcb", "b".repeat(249)));
         std::fs::write(&file, write_board(&blinky()).expect("write")).expect("write");
-        let (b, paths) = open(&file).expect("open");
-        save(&paths, &b).expect("the temporary name doesn't grow with the file name");
+        let (b, paths) = open(&DISK, &file).expect("open");
+        save(&DISK, &paths, &b).expect("the temporary name doesn't grow with the file name");
     }
 
     #[test]
@@ -991,26 +1047,26 @@ mod tests {
         let dir = TempDir::new("native-overwrite");
         let folder = dir.0.join("X");
         let other = Board::new("Other");
-        save_project(&folder, &other, false).expect("first project");
-        assert!(matches!(save_project(&folder, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
-        assert_eq!(open(&folder).expect("open").0, other, "the other project is untouched");
+        save_project(&DISK, &folder, &other, false).expect("first project");
+        assert!(matches!(save_project(&DISK, &folder, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
+        assert_eq!(open(&DISK, &folder).expect("open").0, other, "the other project is untouched");
         // A differently named project in the folder counts too.
         let named = dir.0.join("Y");
         std::fs::create_dir_all(&named).expect("dir");
         std::fs::write(named.join("Legacy.ccproj"), "{}").expect("write");
-        assert!(matches!(save_project(&named, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
+        assert!(matches!(save_project(&DISK, &named, &blinky(), false), Err(NativeError::WouldOverwrite(_))));
         // With overwrite, the board goes into the project that is there, under its own name, so
         // the folder still holds exactly one project.
         let b = blinky();
-        let paths = save_project(&named, &b, true).expect("overwrite when asked");
+        let paths = save_project(&DISK, &named, &b, true).expect("overwrite when asked");
         assert_eq!(paths.project(), Some(named.join("Legacy.ccproj").as_path()));
         assert!(!named.join("Y.ccproj").exists());
-        assert_eq!(open(&named).expect("one project, which opens").0, b);
-        save_project(&folder, &b, true).expect("overwrite when asked");
-        assert_eq!(open(&folder).expect("open").0, b);
+        assert_eq!(open(&DISK, &named).expect("one project, which opens").0, b);
+        save_project(&DISK, &folder, &b, true).expect("overwrite when asked");
+        assert_eq!(open(&DISK, &folder).expect("open").0, b);
         // Several projects in a folder: refused even with overwrite.
         std::fs::write(folder.join("Another.ccproj"), "{}").expect("write");
-        assert!(matches!(save_project(&folder, &b, true), Err(NativeError::Project(_))));
+        assert!(matches!(save_project(&DISK, &folder, &b, true), Err(NativeError::Project(_))));
     }
 
     /// The old scheme wrote through a fixed temporary name (`.<file>.saving`), so a symlink planted
@@ -1021,14 +1077,14 @@ mod tests {
     fn symlinks_at_the_old_temporary_names_cannot_redirect_a_save() {
         let dir = TempDir::new("native-symlink");
         let folder = dir.0.join("Blinky");
-        let paths = save_project(&folder, &blinky(), false).expect("save");
+        let paths = save_project(&DISK, &folder, &blinky(), false).expect("save");
         let victim = dir.0.join("victim.txt");
         std::fs::write(&victim, "precious").expect("write");
         for name in [".Blinky.ccpcb.saving", ".Blinky.ccproj.saving"] {
             std::os::unix::fs::symlink(&victim, folder.join(name)).expect("symlink");
         }
         std::os::unix::fs::symlink(dir.0.join("nowhere"), folder.join(".dangling.saving")).expect("symlink");
-        save(&paths, &blinky()).expect("save");
+        save(&DISK, &paths, &blinky()).expect("save");
         assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "precious");
         let meta = std::fs::symlink_metadata(paths.board()).expect("board");
         assert!(meta.file_type().is_file(), "the board is a regular file, not a link");
@@ -1038,15 +1094,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_regular_files_are_read() {
-        assert!(matches!(read_text(Path::new("/dev/null")), Err(NativeError::NotAFile(_))));
-        assert!(matches!(open(Path::new("/dev/null")), Err(NativeError::NotAFile(_))));
+        assert!(matches!(read_text(&DISK, Path::new("/dev/null")), Err(NativeError::NotAFile(_))));
+        assert!(matches!(open(&DISK, Path::new("/dev/null")), Err(NativeError::NotAFile(_))));
         let dir = TempDir::new("native-device");
         std::fs::create_dir_all(&dir.0).expect("dir");
         // A project whose board name resolves to something that isn't a file.
         let project = write_project(&Project { name: "P".to_owned(), board: "dev.ccpcb".to_owned() }).expect("write");
         std::fs::write(dir.0.join("P.ccproj"), project).expect("write");
         std::os::unix::fs::symlink("/dev/null", dir.0.join("dev.ccpcb")).expect("symlink");
-        assert!(matches!(open(&dir.0), Err(NativeError::NotAFile(_))));
+        assert!(matches!(open(&DISK, &dir.0), Err(NativeError::NotAFile(_))));
     }
 
     #[test]
@@ -1054,10 +1110,10 @@ mod tests {
         let dir = TempDir::new("native-hidden");
         let folder = dir.0.join("Blinky");
         let b = blinky();
-        save_project(&folder, &b, false).expect("save");
+        save_project(&DISK, &folder, &b, false).expect("save");
         std::fs::write(folder.join("._Blinky.ccproj"), [0_u8, 5, 22, 7]).expect("AppleDouble file");
         std::fs::create_dir_all(folder.join("backup.ccproj")).expect("a folder named like a project");
-        assert_eq!(open(&folder).expect("open").0, b);
+        assert_eq!(open(&DISK, &folder).expect("open").0, b);
     }
 
     /// A relative path from the working folder to a temporary project (`../../…/tmp/…`), so the
@@ -1067,14 +1123,88 @@ mod tests {
     fn a_relative_path_opens_with_an_absolute_folder() {
         let dir = TempDir::new("native-relative");
         let folder = dir.0.join("Blinky");
-        save_project(&folder, &blinky(), false).expect("save");
+        save_project(&DISK, &folder, &blinky(), false).expect("save");
         let cwd = std::env::current_dir().expect("cwd");
         let ups = cwd.components().filter(|c| matches!(c, std::path::Component::Normal(_))).count();
         let mut relative: PathBuf = std::iter::repeat_n("..", ups).collect();
         relative.push(folder.strip_prefix("/").expect("absolute temp folder"));
         assert!(relative.is_relative());
-        let (_, paths) = open(&relative).expect("open");
+        let (_, paths) = open(&DISK, &relative).expect("open");
         assert!(paths.folder().is_absolute() && paths.folder().ends_with("Blinky"), "{:?}", paths.folder());
+    }
+
+    #[test]
+    fn a_recovery_file_holds_a_board_and_where_it_came_from() {
+        let b = blinky();
+        let text = write_recovery(&b, Some(Path::new("/work/Blinky"))).expect("write");
+        assert!(text.starts_with("{\n  \"format\": \"circuitcraft.recovery\",\n  \"version\": 1,\n  \"from\": \"/work/Blinky\",\n"), "{text}");
+        assert_eq!(read_recovery(&text).ok(), Some((b.clone(), Some("/work/Blinky".to_owned()))));
+        assert_eq!(peek_recovery(&text).ok(), Some(RecoveryHeader { name: "Blinky".to_owned(), from: Some("/work/Blinky".to_owned()) }));
+        let unsaved = write_recovery(&b, None).expect("write");
+        assert_eq!(read_recovery(&unsaved).ok(), Some((b.clone(), None)));
+        // It is no board file, a board file is no recovery file, and it is read as strictly.
+        assert!(matches!(read_board(&text), Err(NativeError::WrongFormat { expected: "board", .. })));
+        assert!(matches!(read_recovery(&write_board(&b).expect("write")), Err(NativeError::WrongFormat { expected: "recovery", .. })));
+        assert!(matches!(peek_recovery(&write_board(&b).expect("write")), Err(NativeError::WrongFormat { .. })));
+        assert!(matches!(read_recovery(&text.replacen("\"version\": 1", "\"version\": 2", 1)), Err(NativeError::TooNew(2))));
+        assert!(matches!(read_recovery(&text.replacen("  \"from\": \"/work/Blinky\",\n", "", 1)), Err(NativeError::Malformed(_))));
+        assert!(matches!(read_recovery(&text.replacen("\"from\"", "\"extra\": 1,\n  \"from\"", 1)), Err(NativeError::Malformed(_))));
+        // A board that doesn't hold together is refused when it is read in full; the peek, which
+        // only lists it, still says what it is called.
+        let broken = text.replacen("\"track_width\": 250000", "\"track_width\": 0", 1);
+        assert!(matches!(read_recovery(&broken), Err(NativeError::Invalid(_))));
+        assert_eq!(peek_recovery(&broken).ok().map(|h| h.name), Some("Blinky".to_owned()));
+        for text in ["", "{", "null", "{\"format\":\"circuitcraft.recovery\",\"version\":1,\"from\":null,\"board\":7}"] {
+            assert!(read_recovery(text).is_err() && peek_recovery(text).is_err(), "{text}");
+        }
+        // The peek checks what kind of file it is, too: something shaped alike is not listed as a
+        // board, and neither is one from a newer build.
+        let alike =
+            |format: &str, version: u32| format!("{{\"format\":\"{format}\",\"version\":{version},\"from\":null,\"board\":{{\"name\":\"B\"}}}}");
+        assert_eq!(peek_recovery(&alike(RECOVERY_FORMAT, 1)).ok().map(|h| h.name), Some("B".to_owned()));
+        assert!(matches!(peek_recovery(&alike("something.else", 1)), Err(NativeError::WrongFormat { .. })));
+        assert!(matches!(peek_recovery(&alike(RECOVERY_FORMAT, 2)), Err(NativeError::TooNew(2))));
+        // Where a board came from is shown to people and sent to agents: it is cut to a length
+        // that is safe for both.
+        let long = text.replacen("/work/Blinky", &"x".repeat(MAX_FROM_CHARS + 10), 1);
+        assert_eq!(peek_recovery(&long).ok().and_then(|h| h.from).map(|f| f.len()), Some(MAX_FROM_CHARS));
+        assert_eq!(read_recovery(&long).ok().and_then(|(_, from)| from).map(|f| f.len()), Some(MAX_FROM_CHARS));
+    }
+
+    /// A storage whose one file says it is larger than any file that is read, and can't be read.
+    #[derive(Debug)]
+    struct Huge;
+    impl Storage for Huge {
+        fn kind(&self, _: &Path) -> std::io::Result<Kind> {
+            Ok(Kind::File(MAX_FILE_BYTES + 1))
+        }
+        fn read(&self, _: &Path, _: u64) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::other("a file this large must not be read"))
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn create_folder(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn files(&self, _: &Path) -> std::io::Result<Vec<PathBuf>> {
+            Ok(Vec::new())
+        }
+        fn absolute(&self, path: &Path) -> std::io::Result<PathBuf> {
+            Ok(path.to_owned())
+        }
+        fn recovery_folder(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_too_large_is_refused_before_it_is_read() {
+        assert!(matches!(read_text(&Huge, Path::new("/big.ccpcb")), Err(NativeError::TooLarge(_))));
+        assert!(matches!(open(&Huge, Path::new("/big.ccpcb")), Err(NativeError::TooLarge(_))));
     }
 
     #[test]
@@ -1090,12 +1220,12 @@ mod tests {
     fn opening_bad_folders_fails_cleanly() {
         let dir = TempDir::new("native-bad");
         std::fs::create_dir_all(&dir.0).expect("dir");
-        assert!(matches!(open(&dir.0), Err(NativeError::Project(_))), "empty folder");
-        assert!(matches!(open(&dir.0.join("missing.ccpcb")), Err(NativeError::Io { .. })));
+        assert!(matches!(open(&DISK, &dir.0), Err(NativeError::Project(_))), "empty folder");
+        assert!(matches!(open(&DISK, &dir.0.join("missing.ccpcb")), Err(NativeError::Io { .. })));
         std::fs::write(dir.0.join("a.ccproj"), "{}").expect("write");
         std::fs::write(dir.0.join("b.ccproj"), "{}").expect("write");
-        assert!(matches!(open(&dir.0), Err(NativeError::Project(_))), "two project files");
+        assert!(matches!(open(&DISK, &dir.0), Err(NativeError::Project(_))), "two project files");
         std::fs::write(dir.0.join("not-utf8.ccpcb"), [0xff, 0xfe, 0x00]).expect("write");
-        assert!(matches!(open(&dir.0.join("not-utf8.ccpcb")), Err(NativeError::Malformed(_))));
+        assert!(matches!(open(&DISK, &dir.0.join("not-utf8.ccpcb")), Err(NativeError::Malformed(_))));
     }
 }

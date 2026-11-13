@@ -162,8 +162,13 @@ impl Board {
     }
 
     fn id_in_use(&self, id: ItemId) -> bool {
-        self.nets.contains(NetId::from_u128(id.as_u128()))
-            || self.tracks.contains(id)
+        self.nets.contains(NetId::from_u128(id.as_u128())) || self.has_item(id)
+    }
+
+    /// Whether a top-level item (a track, via, footprint, zone, keepout, hole, text or drawing)
+    /// has this id: what can be selected, and what [`Board::remove`] removes besides nets.
+    pub fn has_item(&self, id: ItemId) -> bool {
+        self.tracks.contains(id)
             || self.vias.contains(id)
             || self.footprints.contains(id)
             || self.zones.contains(id)
