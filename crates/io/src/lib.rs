@@ -72,9 +72,10 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
     None
 }
 
-/// The value of the first `"format"` key in a JSON prefix (native files write it first).
+/// The value of `"format"` when it is the first key of a JSON object, as native files write it;
+/// a `"format"` key anywhere else (nested, or after other keys) doesn't count.
 fn native_format(text: &str) -> Option<&str> {
-    let (_, after) = text.split_once("\"format\"")?;
+    let after = text.strip_prefix('{')?.trim_start().strip_prefix("\"format\"")?;
     let value = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
     value.split_once('"').map(|(v, _)| v)
 }
@@ -115,6 +116,8 @@ mod tests {
         assert_eq!(detect(b"{\"format\":\"circuitcraft.project\"}"), Some(Format::CircuitCraftProject));
         assert_eq!(detect(b"{\"format\": \"something.else\"}"), None);
         assert_eq!(detect(b"{\"name\": 1}"), None);
+        assert_eq!(detect(b"{\"name\":\"x\",\"config\":{\"format\":\"circuitcraft.board\"}}"), None, "not the first key");
+        assert_eq!(detect(b"{\"version\": 1, \"format\": \"circuitcraft.board\"}"), None, "not the first key");
     }
 
     #[test]
