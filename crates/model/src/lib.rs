@@ -15,12 +15,13 @@ mod store;
 
 pub use document::{Document, UNDO_LIMIT};
 pub use items::{
-    Drill, Footprint, Graphic, GraphicShape, ItemId, Justify, Net, NetId, Pad, PadKind, PadShape, Rotation, Side, Text, Track, TrackPath, Via, Zone,
+    Drill, Footprint, Graphic, GraphicShape, ItemId, Justify, MAX_FOOTPRINT_GRAPHICS, MAX_PADS, Net, NetId, Pad, PadKind, PadShape, Rotation, Side,
+    Text, Track, TrackPath, Via, Zone,
 };
-pub use layer::{Layer, LayerId, LayerKind, LayerStack, ids as layer_ids};
-pub use store::{Items, Keyed};
+pub use layer::{Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, ids as layer_ids};
+pub use store::{Items, Keyed, MAX_ITEMS};
 
-use circuitcraft_geom::{Contour, Edge};
+use circuitcraft_geom::{Contour, Edge, MAX_POINTS};
 use circuitcraft_units::{MAX_ABS, Nm, Point};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,9 @@ pub enum ModelError {
     /// The board has run out of ids (2⁶⁴ of them).
     #[error("out of item ids")]
     IdsExhausted,
+    /// A collection is at its size limit ([`MAX_ITEMS`], [`MAX_PADS`], [`MAX_LAYERS`], ...).
+    #[error("too many {0}")]
+    TooMany(&'static str),
 }
 
 /// A printed circuit board.
@@ -65,7 +69,8 @@ pub struct Board {
     pub stack: LayerStack,
     /// The board outline, if drawn.
     pub outline: Option<Contour>,
-    /// Holes and slots cut through the board inside the outline.
+    /// Holes and slots cut through the board inside the outline (at most [`MAX_ITEMS`]).
+    #[serde(deserialize_with = "cutouts")]
     pub cutouts: Vec<Contour>,
     /// Nets.
     pub nets: Items<Net>,
@@ -83,6 +88,15 @@ pub struct Board {
     pub graphics: Items<Graphic>,
     /// The next id to hand out; every id on the board is below it.
     pub next_id: u64,
+}
+
+fn cutouts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Contour>, D::Error> {
+    store::bounded_vec(d, MAX_ITEMS)
+}
+
+/// Refuses to add to a collection that is already at [`MAX_ITEMS`].
+fn room<T: Keyed>(items: &Items<T>, what: &'static str) -> Result<(), ModelError> {
+    if items.len() >= MAX_ITEMS { Err(ModelError::TooMany(what)) } else { Ok(()) }
 }
 
 impl Board {
@@ -119,6 +133,7 @@ impl Board {
     /// Adds a net with a unique name.
     pub fn add_net(&mut self, name: &str) -> Result<NetId, ModelError> {
         check_name(name, "net name")?;
+        room(&self.nets, "nets")?;
         if self.net_by_name(name).is_some() {
             return Err(ModelError::BadName(name.to_owned(), "a net with this name exists"));
         }
@@ -129,6 +144,7 @@ impl Board {
 
     /// Adds a track; its id is assigned here.
     pub fn add_track(&mut self, layer: LayerId, width: Nm, path: TrackPath, net: Option<NetId>) -> Result<ItemId, ModelError> {
+        room(&self.tracks, "tracks")?;
         let id = ItemId(self.fresh_id()?);
         let track = Track { id, layer, width, path, net };
         self.check_track(&track)?;
@@ -141,6 +157,7 @@ impl Board {
         let (Some(from), Some(to)) = (self.stack.copper().next().map(|l| l.id), self.stack.copper().last().map(|l| l.id)) else {
             return Err(ModelError::BadLayer("via", "copper"));
         };
+        room(&self.vias, "vias")?;
         let id = ItemId(self.fresh_id()?);
         let via = Via { id, position, diameter, drill, from, to, net };
         self.check_via(&via)?;
@@ -200,10 +217,15 @@ impl Board {
         }
     }
 
-    /// Checks the whole board: names, ids, layer and net references, sizes and coordinates.
-    /// Run it on any board that didn't come from these edit methods, such as one read from a file.
+    /// Checks the whole board: the layer stack, names, ids, layer and net references, sizes,
+    /// coordinates and collection limits. Run it on any board that didn't come from these edit
+    /// methods, such as one read from a file.
     pub fn validate(&self) -> Result<(), ModelError> {
         check_name(&self.name, "board name")?;
+        // Layer lookups return the first match, so the stack must be unambiguous before any item's
+        // layer is checked against it.
+        self.stack.validate()?;
+        self.check_collections()?;
         let mut ids = std::collections::BTreeSet::new();
         let mut claim = |id: u64| if id >= self.next_id || !ids.insert(id) { Err(ModelError::BadId(id)) } else { Ok(()) };
         for n in self.nets.iter() {
@@ -249,6 +271,12 @@ impl Board {
             check_point(f.position, "footprint position")?;
             check_name(&f.reference, "reference")?;
             check_len(&f.value, "value")?;
+            if f.pads.len() > MAX_PADS {
+                return Err(ModelError::TooMany("pads"));
+            }
+            if f.graphics.len() > MAX_FOOTPRINT_GRAPHICS {
+                return Err(ModelError::TooMany("footprint drawings"));
+            }
             for p in &f.pads {
                 check_name(&p.number, "pad number")?;
                 check_point(p.position, "pad position")?;
@@ -264,6 +292,35 @@ impl Board {
             }
         }
         Ok(())
+    }
+
+    /// Every collection is within [`MAX_ITEMS`] and files each item under its own id (an id
+    /// changed through [`Items::get_mut`] would leave it unreachable by its new id).
+    fn check_collections(&self) -> Result<(), ModelError> {
+        let lens = [
+            (self.nets.len(), "nets"),
+            (self.footprints.len(), "footprints"),
+            (self.tracks.len(), "tracks"),
+            (self.vias.len(), "vias"),
+            (self.zones.len(), "zones"),
+            (self.texts.len(), "texts"),
+            (self.graphics.len(), "drawings"),
+            (self.cutouts.len(), "cutouts"),
+        ];
+        if let Some((_, what)) = lens.iter().find(|(n, _)| *n > MAX_ITEMS) {
+            return Err(ModelError::TooMany(what));
+        }
+        let misfiled = (self.nets.mismatched_key().map(|k| k.0))
+            .or_else(|| self.footprints.mismatched_key().map(|k| k.0))
+            .or_else(|| self.tracks.mismatched_key().map(|k| k.0))
+            .or_else(|| self.vias.mismatched_key().map(|k| k.0))
+            .or_else(|| self.zones.mismatched_key().map(|k| k.0))
+            .or_else(|| self.texts.mismatched_key().map(|k| k.0))
+            .or_else(|| self.graphics.mismatched_key().map(|k| k.0));
+        match misfiled {
+            Some(k) => Err(ModelError::BadId(k)),
+            None => Ok(()),
+        }
     }
 
     fn check_net(&self, net: Option<NetId>, what: &'static str) -> Result<(), ModelError> {
@@ -361,6 +418,9 @@ fn check_size(n: Nm, what: &'static str, zero_ok: bool) -> Result<(), ModelError
 }
 
 fn check_contour(c: &Contour, what: &'static str) -> Result<(), ModelError> {
+    if c.edges.len() > MAX_POINTS {
+        return Err(ModelError::TooMany("contour edges"));
+    }
     check_point(c.start, what)?;
     for e in &c.edges {
         match *e {
@@ -384,7 +444,12 @@ fn check_pad_shape(s: &PadShape) -> Result<(), ModelError> {
         PadShape::RoundRect { width, height, radius } => {
             check_size(*width, "pad width", false)?;
             check_size(*height, "pad height", false)?;
-            check_size(*radius, "pad corner radius", true)
+            check_size(*radius, "pad corner radius", true)?;
+            // The corners must fit: two radii side by side are no wider than the shorter side.
+            if radius.0.saturating_mul(2) > width.0.min(height.0) {
+                return Err(ModelError::BadSize("pad corner radius (at most half the shorter side)"));
+            }
+            Ok(())
         }
         PadShape::Custom { outline } => check_contour(outline, "pad outline"),
     }
@@ -459,6 +524,40 @@ mod tests {
         let mut unnamed = b;
         unnamed.name = String::new();
         assert!(matches!(unnamed.validate(), Err(ModelError::BadName(..))));
+    }
+
+    #[test]
+    fn validate_checks_the_layer_stack() {
+        let mut b = Board::new("x");
+        if let Some(l) = b.stack.layers.get_mut(1) {
+            l.name = "Top Paste".to_owned();
+        }
+        assert!(matches!(b.validate(), Err(ModelError::BadName(..))));
+        let mut b = Board::new("x");
+        if let Some(l) = b.stack.layers.get_mut(1) {
+            l.id = TOP_COPPER;
+        }
+        assert_eq!(b.validate(), Err(ModelError::BadLayer("layer stack", "uniquely numbered")));
+    }
+
+    #[test]
+    fn validate_catches_an_id_changed_in_place() {
+        let mut b = Board::new("x");
+        let t = b.add_track(TOP_COPPER, Nm(1), line(p(0, 0), p(1, 0)), None).expect("track");
+        b.next_id = 100;
+        if let Some(track) = b.tracks.get_mut(t) {
+            track.id = ItemId(50);
+        }
+        assert!(b.tracks.get(ItemId(50)).is_none(), "still filed under the old id");
+        assert_eq!(b.validate(), Err(ModelError::BadId(t.0)));
+    }
+
+    #[test]
+    fn round_rect_corners_must_fit() {
+        let rr = |r: i64| PadShape::RoundRect { width: Nm(100), height: Nm(60), radius: Nm(r) };
+        assert_eq!(check_pad_shape(&rr(30)), Ok(()));
+        assert!(matches!(check_pad_shape(&rr(31)), Err(ModelError::BadSize(_))));
+        assert!(matches!(check_pad_shape(&rr(1_000)), Err(ModelError::BadSize(_))));
     }
 
     #[test]

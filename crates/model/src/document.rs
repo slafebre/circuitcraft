@@ -1,17 +1,23 @@
 //! An open board with undo and redo.
 
 use crate::{Board, ModelError};
+use std::sync::Arc;
 
 /// How many steps of undo are kept. Snapshots share unchanged items, so each costs memory in
 /// proportion to the number of items on the board (pointers), not their content.
 pub const UNDO_LIMIT: usize = 500;
 
-/// A board being edited, with its undo and redo history.
+/// One step of history: its label and the board on the other side of it. Shared, so a
+/// [`Checkpoint`] can hold the whole history by copying pointers.
+type Step = Arc<(String, Board)>;
+
+/// A board being edited, with its undo and redo history. Cloning it is cheap: the board shares
+/// its items and the history shares its steps.
 #[derive(Debug, Clone)]
 pub struct Document {
     board: Board,
-    undo: Vec<(String, Board)>,
-    redo: Vec<(String, Board)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
 }
 
 impl Document {
@@ -53,20 +59,20 @@ impl Document {
         if self.undo.len() >= UNDO_LIMIT {
             self.undo.remove(0);
         }
-        self.undo.push((label.to_owned(), board));
+        self.undo.push(Arc::new((label.to_owned(), board)));
     }
 
     /// Undoes the last change; returns its label, or `None` when there is nothing to undo.
     pub fn undo(&mut self) -> Option<String> {
-        let (label, board) = self.undo.pop()?;
+        let (label, board) = Arc::unwrap_or_clone(self.undo.pop()?);
         let current = std::mem::replace(&mut self.board, board);
-        self.redo.push((label.clone(), current));
+        self.redo.push(Arc::new((label.clone(), current)));
         Some(label)
     }
 
     /// Redoes the last undone change; returns its label, or `None` when there is nothing to redo.
     pub fn redo(&mut self) -> Option<String> {
-        let (label, board) = self.redo.pop()?;
+        let (label, board) = Arc::unwrap_or_clone(self.redo.pop()?);
         let current = std::mem::replace(&mut self.board, board);
         self.push_undo(&label, current);
         Some(label)
@@ -74,35 +80,30 @@ impl Document {
 
     /// The label of the change [`Document::undo`] would undo.
     pub fn undo_label(&self) -> Option<&str> {
-        self.undo.last().map(|(l, _)| l.as_str())
+        self.undo.last().map(|s| s.0.as_str())
     }
 
     /// The label of the change [`Document::redo`] would redo.
     pub fn redo_label(&self) -> Option<&str> {
-        self.redo.last().map(|(l, _)| l.as_str())
+        self.redo.last().map(|s| s.0.as_str())
     }
 
-    /// A cheap copy of the current state, for restoring after a failure outside [`Document::edit`]
-    /// (the engine's panic guard).
+    /// A cheap copy of the board and its whole history, for restoring after a failure outside
+    /// [`Document::edit`] (the engine's panic guard).
     pub fn checkpoint(&self) -> Checkpoint {
-        Checkpoint { board: self.board.clone(), undo: self.undo.len(), redo: self.redo.len() }
+        Checkpoint(self.clone())
     }
 
-    /// Puts the board back to a checkpoint and drops history recorded since.
+    /// Puts the board and its history back exactly as they were at a checkpoint, including steps
+    /// undone, cleared or evicted since.
     pub fn restore(&mut self, c: Checkpoint) {
-        self.board = c.board;
-        self.undo.truncate(c.undo);
-        self.redo.truncate(c.redo);
+        *self = c.0;
     }
 }
 
 /// A saved state from [`Document::checkpoint`].
 #[derive(Debug, Clone)]
-pub struct Checkpoint {
-    board: Board,
-    undo: usize,
-    redo: usize,
-}
+pub struct Checkpoint(Document);
 
 #[cfg(test)]
 mod tests {
@@ -181,5 +182,46 @@ mod tests {
         assert_eq!(d.board().tracks.len(), 1);
         assert_eq!(d.undo().as_deref(), Some("Add track"));
         assert!(d.undo().is_none());
+    }
+
+    #[test]
+    fn checkpoint_brings_back_an_undone_step() {
+        let mut d = Document::new(Board::new("x"));
+        track(&mut d, 1).expect("1");
+        let c = d.checkpoint();
+        d.undo();
+        d.restore(c);
+        assert_eq!(d.board().tracks.len(), 1);
+        assert_eq!(d.undo().as_deref(), Some("Add track"), "the restored edit can still be undone");
+        assert!(d.redo().is_some());
+    }
+
+    #[test]
+    fn checkpoint_brings_back_cleared_redo() {
+        let mut d = Document::new(Board::new("x"));
+        track(&mut d, 1).expect("1");
+        d.undo();
+        let c = d.checkpoint();
+        track(&mut d, 2).expect("2"); // clears redo
+        d.restore(c);
+        assert_eq!(d.redo().as_deref(), Some("Add track"));
+        assert_eq!(d.board().tracks.iter().map(|t| t.path.ends().1.x).collect::<Vec<_>>(), [Nm(1)]);
+    }
+
+    #[test]
+    fn checkpoint_brings_back_an_evicted_step() {
+        let mut d = Document::new(Board::new("x"));
+        for i in 0..UNDO_LIMIT as i64 {
+            track(&mut d, i + 1).expect("track");
+        }
+        let c = d.checkpoint();
+        track(&mut d, 0).expect("one more evicts the oldest step");
+        d.restore(c);
+        let mut steps = 0;
+        while d.undo().is_some() {
+            steps += 1;
+        }
+        assert_eq!(steps, UNDO_LIMIT);
+        assert!(d.board().tracks.is_empty());
     }
 }

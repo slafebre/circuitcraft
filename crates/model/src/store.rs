@@ -3,11 +3,43 @@
 //! Each item sits behind an [`Arc`], so cloning a whole board (an undo snapshot) copies pointers,
 //! not items, and editing one item copies only that item ([`Arc::make_mut`]). Items are kept in id
 //! order, which also gives saved files a stable order.
+//!
+//! Decoding is bounded: a collection longer than its limit is refused as it is read, before the
+//! excess is allocated, so a hostile file cannot exhaust memory.
 
-use serde::de::Error as _;
+use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
+
+/// The most items one collection may hold (tracks, vias, nets, ...). Far above any real board;
+/// it exists so that reading a file cannot allocate without limit.
+pub const MAX_ITEMS: usize = 1_000_000;
+
+/// Decodes a list of at most `max` elements, refusing a longer one as soon as it is seen.
+pub(crate) fn bounded_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D, max: usize) -> Result<Vec<T>, D::Error> {
+    struct Bounded<T>(usize, PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for Bounded<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "a list of at most {} elements", self.0)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            // The size hint comes from the input, so it only ever caps the first allocation.
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(self.0).min(4_096));
+            while let Some(v) = seq.next_element()? {
+                if out.len() >= self.0 {
+                    return Err(A::Error::custom(format!("more than {} elements", self.0)));
+                }
+                out.push(v);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(Bounded(max, PhantomData))
+}
 
 /// Something stored in an [`Items`] collection: it knows its own id.
 pub trait Keyed {
@@ -78,10 +110,17 @@ impl<T: Keyed> Items<T> {
     pub fn remove(&mut self, id: T::Id) -> Option<Arc<T>> {
         self.map.remove(&id)
     }
+
+    /// The first key whose item no longer reports that id (its `id` was changed through
+    /// [`Items::get_mut`]); `None` when every item is filed under its own id.
+    pub fn mismatched_key(&self) -> Option<T::Id> {
+        self.map.iter().find(|(k, v)| v.id() != **k).map(|(k, _)| *k)
+    }
 }
 
 impl<T: Keyed + Clone> Items<T> {
-    /// The item with this id, for editing; copies it first if a snapshot still shares it.
+    /// The item with this id, for editing; copies it first if a snapshot still shares it. Don't
+    /// change its id: the item stays filed under the old one, and `Board::validate` refuses that.
     pub fn get_mut(&mut self, id: T::Id) -> Option<&mut T> {
         self.map.get_mut(&id).map(Arc::make_mut)
     }
@@ -95,16 +134,29 @@ impl<T: Keyed + Serialize> Serialize for Items<T> {
 }
 
 impl<'de, T: Keyed + Deserialize<'de>> Deserialize<'de> for Items<T> {
+    /// A list of at most [`MAX_ITEMS`] items with distinct ids, filed as they are read.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let list = Vec::<T>::deserialize(d)?;
-        let mut items = Items::default();
-        for item in list {
-            let id = item.id();
-            if items.insert(item).is_some() {
-                return Err(D::Error::custom(format!("duplicate id {id:?}")));
+        struct ItemsVisitor<T>(PhantomData<T>);
+        impl<'de, T: Keyed + Deserialize<'de>> Visitor<'de> for ItemsVisitor<T> {
+            type Value = Items<T>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a list of at most {MAX_ITEMS} items")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Items<T>, A::Error> {
+                let mut items = Items::default();
+                while let Some(item) = seq.next_element::<T>()? {
+                    if items.len() >= MAX_ITEMS {
+                        return Err(A::Error::custom(format!("more than {MAX_ITEMS} items")));
+                    }
+                    let id = item.id();
+                    if items.insert(item).is_some() {
+                        return Err(A::Error::custom(format!("duplicate id {id:?}")));
+                    }
+                }
+                Ok(items)
             }
         }
-        Ok(items)
+        d.deserialize_seq(ItemsVisitor(PhantomData))
     }
 }
 
@@ -150,5 +202,32 @@ mod tests {
         let back: Items<Thing> = serde_json::from_str(&json).expect("parse");
         assert_eq!(back, a);
         assert!(serde_json::from_str::<Items<Thing>>(r#"[{"id":1,"v":1},{"id":1,"v":2}]"#).is_err());
+    }
+
+    #[test]
+    fn decoding_stops_at_the_item_limit() {
+        let list = |n: usize| format!("[{}]", (0..n).map(|i| format!(r#"{{"id":{i},"v":0}}"#)).collect::<Vec<_>>().join(","));
+        let at_limit: Items<Thing> = serde_json::from_str(&list(MAX_ITEMS)).expect("at the limit");
+        assert_eq!(at_limit.len(), MAX_ITEMS);
+        assert!(serde_json::from_str::<Items<Thing>>(&list(MAX_ITEMS + 1)).is_err());
+    }
+
+    #[test]
+    fn bounded_vec_refuses_long_lists() {
+        let mut de = serde_json::Deserializer::from_str("[1,2,3]");
+        assert_eq!(bounded_vec::<_, i32>(&mut de, 3).ok(), Some(vec![1, 2, 3]));
+        let mut de = serde_json::Deserializer::from_str("[1,2,3,4]");
+        assert!(bounded_vec::<_, i32>(&mut de, 3).is_err());
+    }
+
+    #[test]
+    fn a_changed_id_is_reported() {
+        let mut a: Items<Thing> = Items::default();
+        a.insert(Thing { id: 1, v: 10 });
+        assert_eq!(a.mismatched_key(), None);
+        if let Some(t) = a.get_mut(1) {
+            t.id = 7;
+        }
+        assert_eq!(a.mismatched_key(), Some(1));
     }
 }

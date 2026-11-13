@@ -231,11 +231,27 @@ pub struct Footprint {
     pub rotation: Rotation,
     /// Mounting side.
     pub side: Side,
-    /// Pads, in footprint coordinates.
+    /// Pads, in footprint coordinates (at most [`MAX_PADS`]).
+    #[serde(deserialize_with = "pads")]
     pub pads: Vec<Pad>,
     /// Silkscreen, courtyard and fabrication drawings, in footprint coordinates. Their layers are
-    /// the top-side layers; a bottom-side footprint flips them.
+    /// the top-side layers; a bottom-side footprint flips them. At most [`MAX_FOOTPRINT_GRAPHICS`].
+    #[serde(deserialize_with = "footprint_graphics")]
     pub graphics: Vec<Graphic>,
+}
+
+/// The most pads one footprint may have (the largest packages have a few thousand).
+pub const MAX_PADS: usize = 100_000;
+
+/// The most drawings one footprint may have.
+pub const MAX_FOOTPRINT_GRAPHICS: usize = 100_000;
+
+fn pads<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Pad>, D::Error> {
+    crate::store::bounded_vec(d, MAX_PADS)
+}
+
+fn footprint_graphics<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Graphic>, D::Error> {
+    crate::store::bounded_vec(d, MAX_FOOTPRINT_GRAPHICS)
 }
 
 /// The centre line of a track.

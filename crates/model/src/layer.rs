@@ -1,5 +1,6 @@
 //! The physical layers of a board.
 
+use crate::ModelError;
 use circuitcraft_units::Nm;
 use serde::{Deserialize, Serialize};
 
@@ -39,11 +40,19 @@ pub struct Layer {
     pub thickness: Option<Nm>,
 }
 
+/// The most layers a stack may have (copper and everything else together).
+pub const MAX_LAYERS: usize = 1_024;
+
 /// The physical layers of a board, top to bottom, plus the outline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayerStack {
     /// Layers, top to bottom.
+    #[serde(deserialize_with = "layers")]
     pub layers: Vec<Layer>,
+}
+
+fn layers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Layer>, D::Error> {
+    crate::store::bounded_vec(d, MAX_LAYERS)
 }
 
 /// Ids of the layers in [`LayerStack::two_layer`], for code that needs a known layer.
@@ -117,6 +126,26 @@ impl LayerStack {
         self.get(id).is_some_and(|l| l.kind == LayerKind::Copper)
     }
 
+    /// Checks that layer names are usable and that no two layers share an id or a name, so every
+    /// lookup by id or name has exactly one answer.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if self.layers.len() > MAX_LAYERS {
+            return Err(ModelError::TooMany("layers"));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        let mut names = std::collections::BTreeSet::new();
+        for l in &self.layers {
+            crate::check_name(&l.name, "layer name")?;
+            if !ids.insert(l.id) {
+                return Err(ModelError::BadLayer("layer stack", "uniquely numbered"));
+            }
+            if !names.insert(l.name.as_str()) {
+                return Err(ModelError::BadName(l.name.clone(), "duplicate layer name"));
+            }
+        }
+        Ok(())
+    }
+
     /// Total thickness of every layer that has one, saturating rather than overflowing.
     pub fn thickness(&self) -> Nm {
         Nm(self.layers.iter().filter_map(|l| l.thickness).fold(0_i64, |sum, t| sum.saturating_add(t.0)))
@@ -148,5 +177,33 @@ mod tests {
         ids.dedup();
         assert_eq!(names.len(), s.layers.len());
         assert_eq!(ids.len(), s.layers.len());
+        assert_eq!(s.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_ambiguous_stacks() {
+        let mut same_id = LayerStack::two_layer();
+        if let Some(l) = same_id.layers.get_mut(1) {
+            l.id = ids::TOP_PASTE;
+        }
+        assert_eq!(same_id.validate(), Err(ModelError::BadLayer("layer stack", "uniquely numbered")));
+        let mut same_name = LayerStack::two_layer();
+        if let Some(l) = same_name.layers.get_mut(1) {
+            l.name = "Top Paste".to_owned();
+        }
+        assert!(matches!(same_name.validate(), Err(ModelError::BadName(..))));
+        let mut unnamed = LayerStack::two_layer();
+        if let Some(l) = unnamed.layers.get_mut(1) {
+            l.name = " ".to_owned();
+        }
+        assert!(matches!(unnamed.validate(), Err(ModelError::BadName(..))));
+    }
+
+    #[test]
+    fn decoding_refuses_too_many_layers() {
+        let one = r#"{"id":1,"name":"L","kind":"copper","thickness":null}"#;
+        let stack = |n: usize| format!(r#"{{"layers":[{}]}}"#, vec![one; n].join(","));
+        assert!(serde_json::from_str::<LayerStack>(&stack(MAX_LAYERS)).is_ok());
+        assert!(serde_json::from_str::<LayerStack>(&stack(MAX_LAYERS + 1)).is_err());
     }
 }
