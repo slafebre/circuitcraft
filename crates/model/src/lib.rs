@@ -19,8 +19,8 @@ mod store;
 pub use change::{BoardEdit, ChangeSet};
 pub use document::{Document, UNDO_LIMIT};
 pub use items::{
-    Footprint, Graphic, GraphicShape, Hole, ItemId, Justify, MAX_FOOTPRINT_GRAPHICS, MAX_PADS, Net, NetId, Opening, Pad, PadFace, PadShape, Rotation,
-    Side, Slot, Text, Track, TrackPath, Via, Zone,
+    Assembly, Footprint, FootprintText, Graphic, GraphicShape, Hole, ItemId, Justify, LibraryLink, MAX_FOOTPRINT_GRAPHICS, MAX_FOOTPRINT_TEXTS,
+    MAX_PADS, Mounting, Net, NetId, Opening, Pad, PadFace, PadShape, Rotation, Side, Slot, Text, TextContent, Track, TrackPath, Via, Zone,
 };
 pub use layer::{Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, ids as layer_ids};
 pub use store::{Change, Items, Keyed, MAX_ITEMS};
@@ -129,7 +129,7 @@ impl Board {
 
     /// A new random id that no net or top-level item on the board has. A clash is about as
     /// likely as guessing a 122-bit number, so the retries only guard against a broken random
-    /// source (footprint drawings aren't searched; [`Board::validate`] checks every id).
+    /// source (footprint drawings and texts aren't searched; [`Board::validate`] checks every id).
     pub fn fresh_id(&self) -> Result<ItemId, ModelError> {
         for _ in 0..8 {
             let id = ItemId::random()?;
@@ -301,11 +301,21 @@ impl Board {
             check_rotation(f.rotation, "footprint rotation")?;
             check_name(&f.reference, "reference")?;
             check_len(&f.value, "value")?;
+            if let Some(link) = &f.link {
+                // A link that names no library says so with an empty name: empty, never blank.
+                if !link.library.is_empty() {
+                    check_name(&link.library, "library name")?;
+                }
+                check_name(&link.footprint, "library footprint name")?;
+            }
             if f.pads.len() > MAX_PADS {
                 return Err(ModelError::TooMany("pads"));
             }
             if f.graphics.len() > MAX_FOOTPRINT_GRAPHICS {
                 return Err(ModelError::TooMany("footprint drawings"));
+            }
+            if f.texts.len() > MAX_FOOTPRINT_TEXTS {
+                return Err(ModelError::TooMany("footprint texts"));
             }
             for p in &f.pads {
                 self.check_pad(p)?;
@@ -313,6 +323,10 @@ impl Board {
             for g in &f.graphics {
                 claim(g.id.as_u128())?;
                 self.check_graphic(g)?;
+            }
+            for t in &f.texts {
+                claim(t.id.as_u128())?;
+                self.check_footprint_text(t)?;
             }
         }
         Ok(())
@@ -429,14 +443,29 @@ impl Board {
     }
 
     fn check_text(&self, t: &Text) -> Result<(), ModelError> {
-        if self.stack.get(t.layer).is_none() {
+        self.check_lettering(t.layer, t.position, t.rotation, t.height, t.stroke)?;
+        check_len(&t.text, "text")
+    }
+
+    fn check_footprint_text(&self, t: &FootprintText) -> Result<(), ModelError> {
+        self.check_lettering(t.layer, t.position, t.rotation, t.height, t.stroke)?;
+        match &t.content {
+            // Blank words would be a second way to show nothing, next to `visible`.
+            TextContent::Fixed(words) => check_name(words, "footprint text"),
+            // The footprint's own reference and value are checked with the footprint.
+            TextContent::Reference | TextContent::Value => Ok(()),
+        }
+    }
+
+    /// Where and how large a text is drawn, for text on the board and text in a footprint.
+    fn check_lettering(&self, layer: LayerId, position: Point, rotation: Rotation, height: Nm, stroke: Nm) -> Result<(), ModelError> {
+        if self.stack.get(layer).is_none() {
             return Err(ModelError::BadLayer("text", "existing"));
         }
-        check_len(&t.text, "text")?;
-        check_point(t.position, "text position")?;
-        check_rotation(t.rotation, "text rotation")?;
-        check_size(t.height, "text height", false)?;
-        check_size(t.stroke, "text stroke", false)
+        check_point(position, "text position")?;
+        check_rotation(rotation, "text rotation")?;
+        check_size(height, "text height", false)?;
+        check_size(stroke, "text stroke", false)
     }
 
     fn check_graphic(&self, g: &Graphic) -> Result<(), ModelError> {
@@ -688,11 +717,14 @@ mod tests {
             id: ItemId::from_u128(1),
             reference: "J1".to_owned(),
             value: String::new(),
+            link: None,
+            assembly: Assembly { mounting: Mounting::ThroughHole, in_bom: true, in_placement: true, fitted: true },
             position: p(0, 0),
             rotation: Rotation(0),
             side: Side::Top,
             pads,
             graphics: Vec::new(),
+            texts: Vec::new(),
         };
         b.footprints.insert(footprint).expect("room");
         b
@@ -831,6 +863,186 @@ mod tests {
             b.texts.insert(text).expect("room");
             assert_eq!(b.validate(), Err(ModelError::OutOfRange("text rotation")));
         }
+    }
+
+    /// A visible footprint text on the top silkscreen, one millimetre high.
+    fn label(id: u128, content: TextContent) -> FootprintText {
+        FootprintText {
+            id: ItemId::from_u128(id),
+            content,
+            visible: true,
+            layer: TOP_SILK,
+            position: p(0, MM),
+            height: Nm(MM),
+            stroke: Nm(150_000),
+            rotation: Rotation(0),
+            mirrored: false,
+            justify: Justify::Center,
+        }
+    }
+
+    fn fixed(text: &str) -> TextContent {
+        TextContent::Fixed(text.to_owned())
+    }
+
+    /// A board with one footprint (id 1, `J1`) that holds `texts`.
+    fn board_with_texts(texts: Vec<FootprintText>) -> Board {
+        let mut b = board_with_pads(Vec::new());
+        if let Some(f) = b.footprints.get_mut(ItemId::from_u128(1)) {
+            f.texts = texts;
+        }
+        b
+    }
+
+    #[test]
+    fn footprint_text_shows_the_reference_the_value_or_its_own_words() {
+        // The designator on the silkscreen and again on the fabrication drawing, the value hidden.
+        let on_fab = FootprintText { layer: layer_ids::TOP_FABRICATION, ..label(3, TextContent::Reference) };
+        let value = FootprintText { visible: false, rotation: Rotation(90_000), mirrored: true, ..label(4, TextContent::Value) };
+        let mut b = board_with_texts(vec![label(2, TextContent::Reference), on_fab, value, label(5, fixed("PIN 1"))]);
+        let id = ItemId::from_u128(1);
+        if let Some(f) = b.footprints.get_mut(id) {
+            f.value = "USB-C".to_owned();
+        }
+        let shown = |b: &Board| b.footprints.get(id).map(|f| f.texts.iter().map(|t| f.wording(t).to_owned()).collect::<Vec<_>>());
+        assert_eq!(shown(&b), Some(vec!["J1".to_owned(), "J1".to_owned(), "USB-C".to_owned(), "PIN 1".to_owned()]));
+        // Renaming the footprint renames it everywhere it is shown: no text holds a copy.
+        if let Some(f) = b.footprints.get_mut(id) {
+            f.reference = "J2".to_owned();
+        }
+        assert_eq!(shown(&b), Some(vec!["J2".to_owned(), "J2".to_owned(), "USB-C".to_owned(), "PIN 1".to_owned()]));
+
+        assert_eq!(b.validate(), Ok(()));
+        let first = serde_json::to_string_pretty(&b).expect("json");
+        let back: Board = serde_json::from_str(&first).expect("parse");
+        assert_eq!(back, b);
+        assert_eq!(serde_json::to_string_pretty(&back).expect("json"), first, "re-save must be byte-identical");
+    }
+
+    #[test]
+    fn validate_refuses_footprint_text_that_cannot_be_drawn() {
+        let check = |text: FootprintText| board_with_texts(vec![text]).validate();
+        let reference = || label(2, TextContent::Reference);
+        assert_eq!(check(reference()), Ok(()));
+        assert_eq!(check(FootprintText { layer: LayerId(999), ..reference() }), Err(ModelError::BadLayer("text", "existing")));
+        assert_eq!(check(FootprintText { position: p(0, i64::MIN), ..reference() }), Err(ModelError::OutOfRange("text position")));
+        assert_eq!(check(FootprintText { height: Nm(0), ..reference() }), Err(ModelError::BadSize("text height")));
+        assert_eq!(check(FootprintText { stroke: Nm(-1), ..reference() }), Err(ModelError::BadSize("text stroke")));
+        for outside in [360_000, -1, i32::MAX, i32::MIN] {
+            assert_eq!(check(FootprintText { rotation: Rotation(outside), ..reference() }), Err(ModelError::OutOfRange("text rotation")));
+        }
+        assert_eq!(check(label(2, fixed(&"x".repeat(MAX_NAME_CHARS)))), Ok(()));
+        for words in [&"x".repeat(MAX_NAME_CHARS + 1), "", " "] {
+            assert!(matches!(check(label(2, fixed(words))), Err(ModelError::BadName(..))), "{words:?}");
+        }
+        // A hidden text is checked like a visible one: showing it must not break the board.
+        assert_eq!(check(FootprintText { visible: false, height: Nm(0), ..reference() }), Err(ModelError::BadSize("text height")));
+    }
+
+    #[test]
+    fn validate_refuses_board_text_that_cannot_be_drawn() {
+        let check = |text: Text| {
+            let mut b = Board::new("x");
+            b.texts.insert(text).expect("room");
+            b.validate()
+        };
+        let note = || Text {
+            id: ItemId::from_u128(2),
+            layer: TOP_SILK,
+            text: "REV A".to_owned(),
+            position: p(0, 0),
+            height: Nm(MM),
+            stroke: Nm(150_000),
+            rotation: Rotation(0),
+            mirrored: false,
+            justify: Justify::Center,
+        };
+        assert_eq!(check(note()), Ok(()));
+        assert_eq!(check(Text { layer: LayerId(999), ..note() }), Err(ModelError::BadLayer("text", "existing")));
+        assert_eq!(check(Text { position: p(i64::MAX, 0), ..note() }), Err(ModelError::OutOfRange("text position")));
+        assert_eq!(check(Text { height: Nm(0), ..note() }), Err(ModelError::BadSize("text height")));
+        assert_eq!(check(Text { stroke: Nm(0), ..note() }), Err(ModelError::BadSize("text stroke")));
+        // Height and stroke are each checked as themselves.
+        assert_eq!(check(Text { height: Nm(1), stroke: Nm(-1), ..note() }), Err(ModelError::BadSize("text stroke")));
+        assert_eq!(check(Text { text: "x".repeat(MAX_NAME_CHARS), ..note() }), Ok(()));
+        assert!(matches!(check(Text { text: "x".repeat(MAX_NAME_CHARS + 1), ..note() }), Err(ModelError::BadName(..))));
+    }
+
+    #[test]
+    fn footprint_texts_share_the_ids_of_the_board() {
+        let id = |n: u128| Err(ModelError::BadId(ItemId::from_u128(n).to_string()));
+        // The footprint's own id, another text's id and the nil id are all taken.
+        assert_eq!(board_with_texts(vec![label(1, TextContent::Reference)]).validate(), id(1));
+        assert_eq!(board_with_texts(vec![label(2, TextContent::Reference), label(2, TextContent::Value)]).validate(), id(2));
+        assert_eq!(board_with_texts(vec![label(0, TextContent::Reference)]).validate(), id(0));
+        // So is the id of an item elsewhere on the board.
+        let mut b = board_with_texts(vec![label(2, TextContent::Reference)]);
+        let track = b.add_track(TOP_COPPER, Nm(1), line(p(0, 0), p(1, 0)), None).expect("track");
+        if let Some(t) = b.footprints.get_mut(ItemId::from_u128(1)).and_then(|f| f.texts.first_mut()) {
+            t.id = track;
+        }
+        assert_eq!(b.validate(), Err(ModelError::BadId(track.to_string())));
+    }
+
+    #[test]
+    fn a_footprint_holds_a_bounded_number_of_texts() {
+        let texts = |n: usize| (0..n).map(|i| label(2 + i as u128, TextContent::Reference)).collect::<Vec<_>>();
+        let full = board_with_texts(texts(MAX_FOOTPRINT_TEXTS));
+        assert_eq!(full.validate(), Ok(()));
+        let json = serde_json::to_string(&full).expect("json");
+        assert_eq!(serde_json::from_str::<Board>(&json).ok().as_ref(), Some(&full));
+        let over = board_with_texts(texts(MAX_FOOTPRINT_TEXTS + 1));
+        assert_eq!(over.validate(), Err(ModelError::TooMany("footprint texts")));
+        // A file is refused while it is read, before the extra text takes any memory.
+        let err = serde_json::from_str::<Board>(&serde_json::to_string(&over).expect("json")).err().map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.contains(&format!("more than {MAX_FOOTPRINT_TEXTS}"))));
+    }
+
+    #[test]
+    fn a_library_link_names_a_footprint() {
+        let linked = |library: &str, footprint: &str| {
+            let mut b = board_with_texts(Vec::new());
+            if let Some(f) = b.footprints.get_mut(ItemId::from_u128(1)) {
+                f.link = Some(LibraryLink { library: library.to_owned(), footprint: footprint.to_owned() });
+            }
+            b.validate()
+        };
+        assert_eq!(linked("Connectors", "USB-C-16P"), Ok(()));
+        assert_eq!(linked("", "USB-C-16P"), Ok(()), "a source that names the footprint alone");
+        let long = "x".repeat(MAX_NAME_CHARS + 1);
+        for (library, footprint) in [(" ", "USB-C-16P"), (long.as_str(), "USB-C-16P"), ("Connectors", ""), ("Connectors", " "), ("Connectors", &long)]
+        {
+            assert!(matches!(linked(library, footprint), Err(ModelError::BadName(..))), "{library:?} {footprint:?}");
+        }
+    }
+
+    #[test]
+    fn assembly_attributes_are_written_in_words() {
+        let mut b = board_with_texts(Vec::new());
+        let id = ItemId::from_u128(1);
+        for (mounting, word) in [(Mounting::SurfaceMount, "surface_mount"), (Mounting::ThroughHole, "through_hole"), (Mounting::Other, "other")] {
+            // As a fiducial has them: nothing to buy, yet the placement machine needs its position.
+            let assembly = Assembly { mounting, in_bom: false, in_placement: true, fitted: true };
+            if let Some(f) = b.footprints.get_mut(id) {
+                f.assembly = assembly;
+            }
+            assert_eq!(b.validate(), Ok(()));
+            let json = serde_json::to_value(&b).expect("json");
+            let written = json.pointer("/footprints/0/assembly").cloned();
+            assert_eq!(written, Some(serde_json::json!({ "mounting": word, "in_bom": false, "in_placement": true, "fitted": true })));
+            let back: Board = serde_json::from_value(json).expect("parse");
+            assert_eq!(back.footprints.get(id).map(|f| f.assembly), Some(assembly));
+        }
+        // A footprint must say how it is mounted, in one of the three words.
+        let mut json = serde_json::to_value(&b).expect("json");
+        if let Some(m) = json.pointer_mut("/footprints/0/assembly/mounting") {
+            *m = serde_json::json!("glued");
+        }
+        assert!(serde_json::from_value::<Board>(json.clone()).is_err());
+        if let Some(a) = json.pointer_mut("/footprints/0/assembly").and_then(|a| a.as_object_mut()) {
+            a.remove("mounting");
+        }
+        assert!(serde_json::from_value::<Board>(json).is_err());
     }
 
     #[test]

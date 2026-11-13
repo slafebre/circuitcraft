@@ -1,7 +1,7 @@
 //! What a board is made of: nets, footprints with pads, tracks, vias, zones, text and drawings.
 //!
-//! Coordinates are board coordinates in [`Nm`], y up, except pads and footprint drawings, which
-//! are relative to their footprint's origin before its rotation and side are applied.
+//! Coordinates are board coordinates in [`Nm`], y up, except pads and footprint drawings and
+//! texts, which are relative to their footprint's origin before its rotation and side are applied.
 
 use crate::store::Keyed;
 use crate::{LayerId, ModelError};
@@ -374,15 +374,102 @@ pub struct Text {
     pub justify: Justify,
 }
 
-/// A placed component's pads and drawings.
+/// What a footprint's text says. A file writes it as `"reference"`, `"value"` or
+/// `{"fixed": "PIN 1"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextContent {
+    /// The footprint's reference designator ([`Footprint::reference`]).
+    Reference,
+    /// The footprint's value ([`Footprint::value`]).
+    Value,
+    /// Words of its own (`PIN 1`, a polarity mark), never blank.
+    Fixed(String),
+}
+
+/// Text that belongs to a footprint, in footprint coordinates: its designator on the silkscreen,
+/// its value on the fabrication drawing, or a fixed label. A footprint can show its reference or
+/// value in several places, and each stays in step with the footprint because none stores a copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FootprintText {
+    /// Identity.
+    pub id: ItemId,
+    /// What it says.
+    pub content: TextContent,
+    /// Whether it is drawn. A hidden text keeps its place, so showing it again puts it back.
+    pub visible: bool,
+    /// The layer it is on, named as for a footprint on the top side; a bottom-side footprint
+    /// flips it ([`crate::LayerStack::flipped`]).
+    pub layer: LayerId,
+    /// Anchor point, relative to the footprint origin.
+    pub position: Point,
+    /// Character height.
+    pub height: Nm,
+    /// Stroke width of the drafting font.
+    pub stroke: Nm,
+    /// Rotation relative to the footprint.
+    pub rotation: Rotation,
+    /// Mirrored against the footprint: a bottom-side footprint already mirrors everything it
+    /// holds, so its text reads correctly from the bottom with this off.
+    pub mirrored: bool,
+    /// Horizontal anchoring.
+    pub justify: Justify,
+}
+
+/// Where a footprint came from: a footprint in a library. Nothing follows the link yet; it is
+/// kept so the footprint can later be compared with its library and updated from it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LibraryLink {
+    /// The library's name. Empty when the source names the footprint alone, never blank.
+    pub library: String,
+    /// The footprint's name in that library (`R_0603`).
+    pub footprint: String,
+}
+
+/// How a component is attached to the board. Whether there is something to buy, place or fit is
+/// for the flags of [`Assembly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mounting {
+    /// Soldered onto pads on the surface.
+    SurfaceMount,
+    /// Leads soldered into holes.
+    ThroughHole,
+    /// Neither: pressed in, screwed on or wired by hand, or a footprint that is part of the board
+    /// itself (a fiducial, a logo, a mounting hole).
+    Other,
+}
+
+/// What assembly needs to know about a footprint. The three flags are independent of `mounting`
+/// and of each other: a fiducial is no part to buy, yet the placement machine needs its position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Assembly {
+    /// How the component is put on the board. It is stored, not worked out from the pads: a
+    /// surface-mount connector with through-hole pegs is still placed as a surface-mount part.
+    pub mounting: Mounting,
+    /// Whether the bill of materials lists it.
+    pub in_bom: bool,
+    /// Whether the pick-and-place file lists it.
+    pub in_placement: bool,
+    /// Whether the component is fitted when the board is assembled; a footprint that is not
+    /// fitted keeps its pads and drawings and stays empty. `true` for a footprint without a
+    /// component, which leaves nothing off the board.
+    pub fitted: bool,
+}
+
+/// A placed component's pads, drawings and text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footprint {
     /// Identity, shared with the schematic symbol once schematics exist.
     pub id: ItemId,
-    /// Reference designator (`R1`, `U3`).
+    /// Reference designator (`R1`, `U3`). `texts` say where it is shown.
     pub reference: String,
-    /// Value (`10k`, `ATmega328P`).
+    /// Value (`10k`, `ATmega328P`). `texts` say where it is shown.
     pub value: String,
+    /// The library footprint it was placed from; `None` for one drawn on the board.
+    pub link: Option<LibraryLink>,
+    /// What assembly needs to know about it.
+    pub assembly: Assembly,
     /// Origin on the board.
     pub position: Point,
     /// Rotation about the origin.
@@ -393,10 +480,26 @@ pub struct Footprint {
     #[serde(deserialize_with = "pads")]
     pub pads: Vec<Pad>,
     /// Silkscreen, courtyard and fabrication drawings, in footprint coordinates. Their layers are
-    /// the top-side layers; a bottom-side footprint flips them ([`crate::LayerStack::flipped`]).
+    /// named as for a footprint on the top side; a bottom-side footprint flips them
+    /// ([`crate::LayerStack::flipped`]).
     /// At most [`MAX_FOOTPRINT_GRAPHICS`].
     #[serde(deserialize_with = "footprint_graphics")]
     pub graphics: Vec<Graphic>,
+    /// Designators, values and labels, in footprint coordinates (at most
+    /// [`MAX_FOOTPRINT_TEXTS`]). A footprint without any shows no designator.
+    #[serde(deserialize_with = "footprint_texts")]
+    pub texts: Vec<FootprintText>,
+}
+
+impl Footprint {
+    /// What `text` says on this footprint: the reference, the value or the text's own words.
+    pub fn wording<'a>(&'a self, text: &'a FootprintText) -> &'a str {
+        match &text.content {
+            TextContent::Reference => &self.reference,
+            TextContent::Value => &self.value,
+            TextContent::Fixed(words) => words,
+        }
+    }
 }
 
 /// The most pads one footprint may have (the largest packages have a few thousand).
@@ -404,6 +507,13 @@ pub const MAX_PADS: usize = 100_000;
 
 /// The most drawings one footprint may have.
 pub const MAX_FOOTPRINT_GRAPHICS: usize = 100_000;
+
+/// The most texts one footprint may have.
+pub const MAX_FOOTPRINT_TEXTS: usize = 10_000;
+
+fn footprint_texts<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<FootprintText>, D::Error> {
+    crate::store::bounded_vec(d, MAX_FOOTPRINT_TEXTS)
+}
 
 fn pads<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Pad>, D::Error> {
     crate::store::bounded_vec(d, MAX_PADS)

@@ -407,8 +407,11 @@ fn find_project_file(folder: &Path) -> Result<PathBuf, NativeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use circuitcraft_model::layer_ids::{TOP_COPPER, TOP_SILK};
-    use circuitcraft_model::{Footprint, Hole, Opening, Pad, PadShape, Rotation, Side, Slot, TrackPath};
+    use circuitcraft_model::layer_ids::{TOP_COPPER, TOP_FABRICATION, TOP_SILK};
+    use circuitcraft_model::{
+        Assembly, Footprint, FootprintText, Hole, Justify, LayerId, LibraryLink, Mounting, Opening, Pad, PadShape, Rotation, Side, Slot, TextContent,
+        TrackPath,
+    };
     use circuitcraft_units::{Nm, Point};
 
     fn blinky() -> Board {
@@ -430,15 +433,37 @@ mod tests {
         if let Some(front) = &mut smd.front {
             front.paste = Opening::Open { by: Some(Nm(-25_000)) };
         }
+        // Its designator on the silkscreen, its value hidden and mirrored on the fabrication
+        // drawing, and a label.
+        let text = |content, layer, visible| FootprintText {
+            id: b.fresh_id().expect("id"),
+            content,
+            visible,
+            layer,
+            position: Point::new(Nm(0), Nm(3_000_000)),
+            height: Nm(1_000_000),
+            stroke: Nm(150_000),
+            rotation: Rotation(0),
+            mirrored: !visible,
+            justify: Justify::Left,
+        };
+        let texts = vec![
+            text(TextContent::Reference, TOP_SILK, true),
+            text(TextContent::Value, TOP_FABRICATION, false),
+            text(TextContent::Fixed("A1".to_owned()), TOP_SILK, true),
+        ];
         let connector = Footprint {
             id: b.fresh_id().expect("id"),
             reference: "J1".to_owned(),
             value: "USB-C".to_owned(),
+            link: Some(LibraryLink { library: "Connectors".to_owned(), footprint: "USB-C-16P".to_owned() }),
+            assembly: Assembly { mounting: Mounting::SurfaceMount, in_bom: true, in_placement: true, fitted: false },
             position: Point::new(Nm(5_000_000), Nm(5_000_000)),
             rotation: Rotation(0),
             side: Side::Top,
             pads: vec![shell, mounting, smd],
             graphics: Vec::new(),
+            texts,
         };
         b.footprints.insert(connector).expect("footprint");
         b
@@ -498,6 +523,40 @@ mod tests {
         }
         let text = write_board(&own_pair).expect("write");
         assert!(matches!(read_board(&text), Err(NativeError::Invalid(ModelError::BadStack(..)))));
+        // A footprint text on a layer the board doesn't have.
+        let mut no_layer = b.clone();
+        let connector = no_layer.footprints.iter().next().map(|f| f.id).expect("footprint");
+        if let Some(t) = no_layer.footprints.get_mut(connector).and_then(|f| f.texts.first_mut()) {
+            t.layer = LayerId(999);
+        }
+        let text = write_board(&no_layer).expect("write");
+        assert!(matches!(read_board(&text), Err(NativeError::Invalid(ModelError::BadLayer("text", "existing")))));
+    }
+
+    #[test]
+    fn a_footprint_must_say_what_it_shows_and_how_it_is_assembled() {
+        let good = write_board(&blinky()).expect("write");
+        // A footprint from before it had texts and assembly attributes, a field under another name
+        // and a word this build doesn't know: refused, not filled in with a guess. (A footprint
+        // without `link` still reads, as one drawn on the board.)
+        for (from, to) in [
+            ("\"texts\"", "\"labels\""),
+            ("\"assembly\"", "\"assembly_v0\""),
+            ("\"in_bom\"", "\"bom\""),
+            ("\"in_placement\"", "\"placed\""),
+            ("\"fitted\"", "\"populated\""),
+            ("\"visible\"", "\"shown\""),
+            ("\"mirrored\"", "\"mirror\""),
+            ("\"content\": \"reference\"", "\"content\": \"designator\""),
+            ("\"content\": \"value\"", "\"content\": \"val\""),
+            ("\"fixed\": \"A1\"", "\"words\": \"A1\""),
+            ("\"mounting\": \"surface_mount\"", "\"mounting\": \"glued\""),
+            ("\"library\": \"Connectors\"", "\"lib\": \"Connectors\""),
+            ("\"footprint\": \"USB-C-16P\"", "\"name\": \"USB-C-16P\""),
+        ] {
+            assert!(good.contains(from), "{from}");
+            assert!(matches!(read_board(&good.replacen(from, to, 1)), Err(NativeError::Malformed(_))), "{from} -> {to}");
+        }
     }
 
     #[test]
