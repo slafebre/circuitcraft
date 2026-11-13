@@ -1,16 +1,23 @@
-//! What a board is made of: nets, footprints with pads, tracks, vias, zones, text and drawings.
+//! What a board is made of: nets, footprints with pads, tracks, vias, zones, keepouts, holes, text
+//! and drawings, and the settings they share.
 //!
 //! Coordinates are board coordinates in [`Nm`], y up, except pads and footprint drawings and
 //! texts, which are relative to their footprint's origin before its rotation and side are applied.
 
 use crate::store::Keyed;
 use crate::{LayerId, ModelError};
-use circuitcraft_geom::{Arc, Contour};
+use circuitcraft_geom::{Arc, Contour, Polygon};
 use circuitcraft_units::{Nm, Point};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
+
+/// Reads a field that may be `null` but must be written: a file that leaves it out is refused,
+/// not read as if it said `null`, so a field that was renamed or lost is noticed.
+pub(crate) fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    Option::deserialize(d)
+}
 
 /// 128 fresh random bits as a version 4 UUID; an error, never a panic, if the system has none.
 fn random_uuid() -> Result<Uuid, ModelError> {
@@ -119,6 +126,7 @@ impl Side {
 
 /// A connection: everything on the same net must end up connected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Net {
     /// Identity.
     pub id: NetId,
@@ -126,9 +134,10 @@ pub struct Net {
     pub name: String,
 }
 
-/// The copper shape of a pad, placed on the pad's copper centre ([`Pad::copper_offset`]).
+/// The copper shape of a pad, placed on the pad's copper centre ([`Pad::copper_offset`]). A file
+/// writes it under its kind: `{"rect": {"width": …, "height": …}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PadShape {
     /// A circle.
     Circle {
@@ -166,17 +175,19 @@ pub enum PadShape {
 }
 
 /// The opening over a pad or via in the solder mask, or the aperture for a pad in the paste
-/// stencil.
+/// stencil. A file writes it as `"rules"`, `"closed"` or `{"open": {"by": …}}`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Opening {
-    /// The board's design rules decide whether there is an opening, and how large.
+    /// The board's design settings decide whether there is an opening, and how large
+    /// ([`DesignSettings::pad_mask`], [`DesignSettings::pad_paste`], [`DesignSettings::via_mask`]).
     #[default]
     Rules,
     /// An opening in the shape of the copper, grown on every side.
     Open {
         /// How much larger than the copper the opening is; smaller when negative, and an opening
-        /// shrunk to nothing is no opening. `None` takes the amount from the design rules.
+        /// shrunk to nothing is no opening. `None` takes the amount from the design settings.
+        #[serde(deserialize_with = "required")]
         by: Option<Nm>,
     },
     /// No opening: the solder mask covers the copper (a tented via), or the stencil has no
@@ -186,20 +197,24 @@ pub enum Opening {
 
 /// What makes a hole a slot: a round hole stretched along one axis, with round ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Slot {
     /// Overall length, end to end; longer than the hole's diameter.
     pub length: Nm,
-    /// Direction of the long axis, relative to the pad (zero is along the pad's x axis). Below
-    /// half a turn, since a slot looks the same turned around.
+    /// Direction of the long axis, relative to the pad the hole is in (zero is along the pad's x
+    /// axis), or to the board for a hole on its own. Below half a turn, since a slot looks the
+    /// same turned around.
     pub rotation: Rotation,
 }
 
 /// A hole through the board: round, or a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hole {
     /// The diameter of a round hole, or the width of a slot.
     pub diameter: Nm,
     /// Makes the hole a slot; `None` for a round hole.
+    #[serde(deserialize_with = "required")]
     pub slot: Option<Slot>,
     /// Whether the hole is plated (connects copper layers).
     pub plated: bool,
@@ -218,6 +233,7 @@ impl Hole {
 /// aperture that is one of several over a large pad, say) is a footprint drawing on the mask or
 /// paste layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PadFace {
     /// Copper shape.
     pub shape: PadShape,
@@ -233,6 +249,7 @@ pub struct PadFace {
 /// pad has copper on every layer around a plated hole; a mounting hole can be a hole alone. On a
 /// side where a hole has no copper, the design rules decide the solder mask opening around it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pad {
     /// The pad number or name, matching a symbol pin (`1`, `A3`, `EP`). Empty for a pad that
     /// belongs to no pin, such as a mounting hole.
@@ -246,14 +263,19 @@ pub struct Pad {
     /// unless the copper sits off centre around the hole.
     pub copper_offset: Point,
     /// Copper, mask and paste on the outer layer of the footprint's own side.
+    #[serde(deserialize_with = "required")]
     pub front: Option<PadFace>,
     /// Copper on the inner copper layers; they all share one shape.
+    #[serde(deserialize_with = "required")]
     pub inner: Option<PadShape>,
     /// Copper, mask and paste on the outer layer of the opposite side.
+    #[serde(deserialize_with = "required")]
     pub back: Option<PadFace>,
     /// The hole through the board.
+    #[serde(deserialize_with = "required")]
     pub hole: Option<Hole>,
     /// The net it connects to.
+    #[serde(deserialize_with = "required")]
     pub net: Option<NetId>,
 }
 
@@ -293,9 +315,10 @@ impl Pad {
     }
 }
 
-/// A line, arc or circle drawn on a layer (silkscreen, outline, documentation).
+/// A line, arc or circle drawn on a layer (silkscreen, outline, documentation). A file writes
+/// it under its kind: `{"line": {"from": …, "to": …}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphicShape {
     /// A straight line.
     Line {
@@ -327,6 +350,7 @@ pub enum GraphicShape {
 
 /// A drawing on a non-copper or copper layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Graphic {
     /// Identity.
     pub id: ItemId,
@@ -353,6 +377,7 @@ pub enum Justify {
 
 /// Text on a layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Text {
     /// Identity.
     pub id: ItemId,
@@ -391,6 +416,7 @@ pub enum TextContent {
 /// its value on the fabrication drawing, or a fixed label. A footprint can show its reference or
 /// value in several places, and each stays in step with the footprint because none stores a copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FootprintText {
     /// Identity.
     pub id: ItemId,
@@ -419,6 +445,7 @@ pub struct FootprintText {
 /// Where a footprint came from: a footprint in a library. Nothing follows the link yet; it is
 /// kept so the footprint can later be compared with its library and updated from it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LibraryLink {
     /// The library's name. Empty when the source names the footprint alone, never blank.
     pub library: String,
@@ -443,6 +470,7 @@ pub enum Mounting {
 /// What assembly needs to know about a footprint. The three flags are independent of `mounting`
 /// and of each other: a fiducial is no part to buy, yet the placement machine needs its position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Assembly {
     /// How the component is put on the board. It is stored, not worked out from the pads: a
     /// surface-mount connector with through-hole pegs is still placed as a surface-mount part.
@@ -459,6 +487,7 @@ pub struct Assembly {
 
 /// A placed component's pads, drawings and text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Footprint {
     /// Identity, shared with the schematic symbol once schematics exist.
     pub id: ItemId,
@@ -467,6 +496,7 @@ pub struct Footprint {
     /// Value (`10k`, `ATmega328P`). `texts` say where it is shown.
     pub value: String,
     /// The library footprint it was placed from; `None` for one drawn on the board.
+    #[serde(deserialize_with = "required")]
     pub link: Option<LibraryLink>,
     /// What assembly needs to know about it.
     pub assembly: Assembly,
@@ -523,9 +553,9 @@ fn footprint_graphics<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Grap
     crate::store::bounded_vec(d, MAX_FOOTPRINT_GRAPHICS)
 }
 
-/// The centre line of a track.
+/// The centre line of a track. A file writes it under its kind: `{"line": {"from": …, "to": …}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrackPath {
     /// A straight segment.
     Line {
@@ -553,6 +583,7 @@ impl TrackPath {
 
 /// A copper track segment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Track {
     /// Identity.
     pub id: ItemId,
@@ -563,11 +594,13 @@ pub struct Track {
     /// Centre line.
     pub path: TrackPath,
     /// The net it carries.
+    #[serde(deserialize_with = "required")]
     pub net: Option<NetId>,
 }
 
 /// A plated hole connecting copper layers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Via {
     /// Identity.
     pub id: ItemId,
@@ -587,24 +620,224 @@ pub struct Via {
     /// Solder mask over the via on the bottom side of the board.
     pub bottom_mask: Opening,
     /// The net it carries.
+    #[serde(deserialize_with = "required")]
     pub net: Option<NetId>,
+}
+
+/// How a zone's copper is laid down inside its outline. A file writes it as `"solid"` or
+/// `{"hatched": {"width": …, "gap": …}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ZoneFill {
+    /// Copper everywhere.
+    Solid,
+    /// A grid of copper lines, running both ways.
+    Hatched {
+        /// The width of each line.
+        width: Nm,
+        /// The gap between neighbouring lines.
+        gap: Nm,
+    },
+}
+
+/// How a zone joins the pads on its own net. A file writes it as `"solid"`, `"none"` or
+/// `{"relief": {"gap": …, "spoke": …}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PadConnection {
+    /// Copper all the way around the pad: the best connection, and the hardest to solder by hand.
+    Solid,
+    /// A thermal relief: a gap around the pad, bridged by spokes, so the pad heats up when it is
+    /// soldered.
+    Relief {
+        /// The gap between the pad and the zone's copper.
+        gap: Nm,
+        /// The width of each spoke.
+        spoke: Nm,
+    },
+    /// No connection: the zone keeps clear of these pads as if they were on another net.
+    None,
 }
 
 /// A copper area (pour) on one layer, filled around everything it must keep clear of.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Zone {
     /// Identity.
     pub id: ItemId,
     /// Copper layer.
     pub layer: LayerId,
     /// The net it connects to (usually a ground or supply).
+    #[serde(deserialize_with = "required")]
     pub net: Option<NetId>,
     /// The area to fill.
     pub outline: Contour,
+    /// Areas inside the outline that this zone leaves empty (at most [`MAX_ZONE_HOLES`]). An area
+    /// that every zone on a layer must stay out of is a [`Keepout`].
+    #[serde(deserialize_with = "zone_holes")]
+    pub holes: Vec<Contour>,
     /// Clearance to copper on other nets.
     pub clearance: Nm,
+    /// The narrowest copper the fill may leave; narrower necks and slivers are removed.
+    pub min_width: Nm,
     /// Higher priority zones fill first where zones overlap.
     pub priority: u32,
+    /// Solid copper or a hatch.
+    pub fill: ZoneFill,
+    /// How it joins the pads on its net.
+    pub pads: PadConnection,
+    /// Whether copper that ends up connected to nothing on the zone's net is kept.
+    pub keep_islands: bool,
+    /// The copper as it was last poured, clearances and thermal reliefs included: at most
+    /// [`MAX_ZONE_POLYGONS`] areas and [`circuitcraft_geom::MAX_POINTS`] points in all, every
+    /// area and every hole in one with at least three corners. Empty for a zone that has not
+    /// been poured. Nothing pours zones yet, so this is what the file the
+    /// board came from held, and it is not kept in step with the rest of the board.
+    #[serde(deserialize_with = "zone_polygons")]
+    pub filled: Vec<Polygon>,
+}
+
+/// The most holes one zone may have.
+pub const MAX_ZONE_HOLES: usize = 10_000;
+
+/// The most separate areas of copper one poured zone may have.
+pub const MAX_ZONE_POLYGONS: usize = 100_000;
+
+fn zone_holes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Contour>, D::Error> {
+    crate::store::bounded_vec(d, MAX_ZONE_HOLES)
+}
+
+/// Reads poured copper, refusing a ring with fewer than three corners as soon as it has been
+/// read. Without that, a file of empty rings would take many times its own size in memory
+/// before [`crate::Board::validate`] saw it; with it, a ring costs about what its text does.
+fn zone_polygons<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Polygon>, D::Error> {
+    struct Ring(Vec<Point>);
+    impl<'de> Deserialize<'de> for Ring {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Ring, D::Error> {
+            let points = Vec::<Point>::deserialize(d)?;
+            if points.len() < 3 { Err(serde::de::Error::custom(FEW_CORNERS)) } else { Ok(Ring(points)) }
+        }
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Area {
+        outer: Ring,
+        holes: Vec<Ring>,
+    }
+    let areas: Vec<Area> = crate::store::bounded_vec(d, MAX_ZONE_POLYGONS)?;
+    Ok(areas.into_iter().map(|a| Polygon { outer: a.outer.0, holes: a.holes.into_iter().map(|r| r.0).collect() }).collect())
+}
+
+/// Why a ring of poured copper is refused.
+pub(crate) const FEW_CORNERS: &str = "an area or a hole in one needs at least three corners";
+
+/// An area on one copper layer that tracks, vias or zones must stay out of.
+///
+/// This is the keepout that says what it keeps out, and on which layer, inner layers included.
+/// A drawing on a keepout layer ([`crate::LayerKind::Keepout`]) keeps all copper out, on an
+/// outer layer or on every layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Keepout {
+    /// Identity.
+    pub id: ItemId,
+    /// The copper layer it applies to.
+    pub layer: LayerId,
+    /// The area.
+    pub outline: Contour,
+    /// Whether tracks must stay out.
+    pub tracks: bool,
+    /// Whether vias must stay out, including vias that only pass through this layer.
+    pub vias: bool,
+    /// Whether the copper of zones must stay out.
+    pub zones: bool,
+}
+
+/// A hole through the board that belongs to no footprint, such as a mounting hole drilled
+/// straight into the board. It has no copper and no net.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardHole {
+    /// Identity.
+    pub id: ItemId,
+    /// The centre of the hole.
+    pub position: Point,
+    /// The hole.
+    pub hole: Hole,
+}
+
+/// Values the whole board shares: what items fall back on when they don't say otherwise, what
+/// new items start with, and where outputs measure from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesignSettings {
+    /// How much larger than the copper a solder mask opening is, on every side; smaller when
+    /// negative.
+    pub mask_expansion: Nm,
+    /// How much larger than the copper a paste aperture is, on every side; usually zero or
+    /// negative.
+    pub paste_expansion: Nm,
+    /// Whether solder mask covers a via that leaves it to the settings ([`Opening::Rules`]).
+    pub tent_vias: bool,
+    /// The clearance between copper on different nets.
+    pub clearance: Nm,
+    /// The width of a new track.
+    pub track_width: Nm,
+    /// The copper diameter of a new via.
+    pub via_diameter: Nm,
+    /// The drill diameter of a new via; smaller than `via_diameter`.
+    pub via_drill: Nm,
+    /// The point that drill and placement files measure from.
+    pub origin: Point,
+}
+
+impl Default for DesignSettings {
+    /// Values most board houses can make: a 0.05 mm mask expansion, paste the size of the pad,
+    /// tented vias, 0.2 mm clearance, 0.25 mm tracks and 0.6 mm vias with a 0.3 mm drill.
+    fn default() -> Self {
+        DesignSettings {
+            mask_expansion: Nm(50_000),
+            paste_expansion: Nm(0),
+            tent_vias: true,
+            clearance: Nm(200_000),
+            track_width: Nm(250_000),
+            via_diameter: Nm(600_000),
+            via_drill: Nm(300_000),
+            origin: Point::ORIGIN,
+        }
+    }
+}
+
+impl DesignSettings {
+    /// How much larger than its copper the solder mask opening of a pad is, or `None` when the
+    /// mask covers the pad.
+    pub fn pad_mask(&self, opening: Opening) -> Option<Nm> {
+        opening.grown(true, self.mask_expansion)
+    }
+
+    /// How much larger than its copper the paste aperture of a pad is, or `None` when the stencil
+    /// has none.
+    pub fn pad_paste(&self, opening: Opening) -> Option<Nm> {
+        opening.grown(true, self.paste_expansion)
+    }
+
+    /// How much larger than its copper the solder mask opening of a via is, or `None` when the
+    /// mask covers the via.
+    pub fn via_mask(&self, opening: Opening) -> Option<Nm> {
+        opening.grown(!self.tent_vias, self.mask_expansion)
+    }
+}
+
+impl Opening {
+    /// How much the opening grows its copper by, or `None` for no opening: the settings open
+    /// what leaves it to them when `open`, and `amount` is their expansion.
+    fn grown(self, open: bool, amount: Nm) -> Option<Nm> {
+        match self {
+            Opening::Rules => open.then_some(amount),
+            Opening::Open { by } => Some(by.unwrap_or(amount)),
+            Opening::Closed => None,
+        }
+    }
 }
 
 macro_rules! keyed {
@@ -618,7 +851,17 @@ macro_rules! keyed {
     };
 }
 
-keyed!(Net => NetId, Footprint => ItemId, Track => ItemId, Via => ItemId, Zone => ItemId, Text => ItemId, Graphic => ItemId);
+keyed!(
+    Net => NetId,
+    Footprint => ItemId,
+    Track => ItemId,
+    Via => ItemId,
+    Zone => ItemId,
+    Keepout => ItemId,
+    BoardHole => ItemId,
+    Text => ItemId,
+    Graphic => ItemId,
+);
 
 #[cfg(test)]
 mod tests {

@@ -4,9 +4,10 @@ use crate::{Arc, GeomError, MAX_POINTS, Rect, check_point};
 use circuitcraft_units::{Nm, Point};
 use serde::{Deserialize, Serialize};
 
-/// One edge of a [`Contour`], from the previous point to `to`.
+/// One edge of a [`Contour`], from the previous point to `to`. A file writes it under its kind:
+/// `{"line": {"to": …}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Edge {
     /// A straight edge.
     Line {
@@ -34,6 +35,7 @@ impl Edge {
 /// A closed outline: from `start` along each edge, and back to `start` with a straight edge if
 /// the last edge doesn't already end there. Board outlines, pours and pad shapes are contours.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Contour {
     /// The first point.
     pub start: Point,
@@ -119,6 +121,7 @@ pub fn area2(ring: &[Point]) -> Option<i128> {
 /// A filled area: an outer ring and the holes cut out of it, with straight edges only (arcs have
 /// been approximated). This is what booleans and offsets work on and return.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Polygon {
     /// The outer boundary.
     pub outer: Vec<Point>,

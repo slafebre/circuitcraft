@@ -12,7 +12,7 @@ pub const UNDO_LIMIT: usize = 500;
 #[derive(Debug)]
 enum Kind {
     /// An edit: the items and settings it changed. The same in both directions.
-    Edit(ChangeSet),
+    Edit(Box<ChangeSet>),
     /// The whole board was replaced (a new or opened board): the board on the other side.
     Replace(Box<Board>),
 }
@@ -122,7 +122,7 @@ impl Document {
         self.recording = false;
         let change = self.board.finish_recording(std::mem::take(&mut self.settings_before));
         if !change.is_empty() {
-            let step = Arc::new(Step { label: label.to_owned(), generation: self.generation, kind: Kind::Edit(change) });
+            let step = Arc::new(Step { label: label.to_owned(), generation: self.generation, kind: Kind::Edit(Box::new(change)) });
             self.push_undo(step.clone());
             self.redo.clear();
             self.changed(step, true);
@@ -402,6 +402,67 @@ mod tests {
         assert_eq!((d.board().name.as_str(), d.board().tracks.get(t).map(|t| (t.width, t.net))), ("x", Some((Nm(100), None))));
         d.redo();
         assert_eq!((d.board().name.as_str(), d.board().tracks.get(t).map(|t| (t.width, t.net))), ("renamed", Some((Nm(250), Some(gnd)))));
+    }
+
+    #[test]
+    fn design_settings_holes_keepouts_and_the_outline_are_rolled_back_undone_and_redone() {
+        use crate::{DesignSettings, Graphic, GraphicShape, Hole, Keepout, layer_ids::OUTLINE};
+        let mm = |x: i64, y: i64| Point::new(Nm(x * 1_000_000), Nm(y * 1_000_000));
+        // A rectangle and a circle drawn on the outline layer, and a keepout.
+        let mut board = Board::new("x");
+        let corners = [mm(0, 0), mm(10, 0), mm(10, 10), mm(0, 10)];
+        let mut shapes: Vec<GraphicShape> = (0..4).map(|i| GraphicShape::Line { from: corners[i], to: corners[(i + 1) % 4] }).collect();
+        shapes.push(GraphicShape::Circle { center: mm(5, 5), radius: Nm(1_000_000) });
+        for shape in shapes {
+            board.graphics.insert(Graphic { id: board.fresh_id().expect("id"), layer: OUTLINE, width: Nm(100_000), shape }).expect("room");
+        }
+        let keepout = board.fresh_id().expect("id");
+        let area = circuitcraft_geom::Contour::polyline(&[mm(1, 1), mm(2, 1), mm(1, 2)]).expect("area");
+        board.keepouts.insert(Keepout { id: keepout, layer: TOP_COPPER, outline: area, tracks: true, vias: true, zones: true }).expect("room");
+        let mut d = Document::new(board);
+        let before = d.board().clone();
+        let wide = DesignSettings { track_width: Nm(500_000), ..DesignSettings::default() };
+        // One edit that changes all of them, and then fails or not.
+        let everything = |b: &mut BoardEdit, fail: bool| {
+            let done = b.assemble_outline(Nm(0))?;
+            b.set_design(wide)?;
+            b.add_hole(Point::ORIGIN, Hole::round(Nm(3_000_000), false))?;
+            b.remove(keepout)?;
+            if fail { Err(ModelError::TooMany("reasons to go on")) } else { Ok(done) }
+        };
+        assert_eq!(d.edit("All", |b| everything(b, true)), Err(ModelError::TooMany("reasons to go on")));
+        assert_eq!((d.board(), d.undo_label()), (&before, None), "a failed edit leaves nothing behind");
+        let done = d.edit("All", |b| everything(b, false)).expect("edit");
+        assert_eq!((done.used, done.cutouts), (5, 1));
+        let after = d.board().clone();
+        assert_eq!((after.design, after.holes.len(), after.keepouts.len(), after.graphics.len()), (wide, 1, 0, 0));
+        assert_eq!((after.outline.is_some(), after.cutouts.len()), (true, 1));
+        // Five drawings, a hole, a keepout, the settings, the outline and the cutouts.
+        let change = match &d.undo.last().expect("a step").kind {
+            Kind::Edit(c) => c,
+            Kind::Replace(_) => panic!("an edit step"),
+        };
+        assert_eq!((change.len(), change.graphics.len(), change.holes.len(), change.keepouts.len(), change.settings_changed()), (10, 5, 1, 1, true));
+        d.undo();
+        assert_eq!(d.board(), &before);
+        d.redo();
+        assert_eq!(d.board(), &after);
+        // A command that panics after the edit is rolled back by its guard.
+        d.undo();
+        d.open_guard();
+        d.edit("All", |b| everything(b, false)).expect("edit");
+        d.rollback_guard();
+        assert_eq!(d.board(), &before);
+        d.redo();
+        assert_eq!(d.board(), &after);
+        // Refused settings and a refused outline leave the board and the history alone.
+        let narrow = DesignSettings { track_width: Nm(0), ..DesignSettings::default() };
+        assert_eq!(d.edit("Settings", |b| b.set_design(narrow)), Err(ModelError::BadSize("track width")));
+        assert!(matches!(d.edit("Outline", |b| b.assemble_outline(Nm(0))), Err(ModelError::BadOutline(_))));
+        assert_eq!((d.board(), d.undo_label()), (&after, Some("All")));
+        // Settings set to what they already are record nothing.
+        d.edit("Settings", |b| b.set_design(wide)).expect("settings");
+        assert_eq!(d.undo_label(), Some("All"));
     }
 
     #[test]

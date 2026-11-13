@@ -3,6 +3,7 @@
 //! - [`Rect`]: bounding boxes.
 //! - [`Arc`]: circular arcs through three points, and their approximation by segments.
 //! - [`Contour`]: closed outlines of straight and arc edges; [`Polygon`]: filled areas with holes.
+//! - [`chain`]: closed outlines assembled from loose lines and arcs.
 //! - [`boolean`], [`offset`], [`stroke`]: polygon booleans, clearance offsets and track shapes,
 //!   on `i_overlay`'s 64-bit integer engine, deterministic on every platform.
 //!
@@ -10,10 +11,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod arc;
+mod chain;
 mod contour;
 mod region;
 
 pub use arc::{Arc, Circle};
+pub use chain::{CHAIN_TOLERANCE, Loop, Piece, chain, ring_within};
 pub use circuitcraft_units::{Nm, Point, UnitError};
 pub use contour::{Contour, Edge, Polygon, area2};
 pub use region::{BoolOp, FillRule, boolean, offset, simplify, stroke};
@@ -54,6 +57,7 @@ pub(crate) fn check_point(p: Point) -> Result<(), GeomError> {
 
 /// An axis-aligned rectangle, `min` at the lower left, `max` at the upper right (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rect {
     /// Lower-left corner.
     pub min: Point,
@@ -82,6 +86,11 @@ impl Rect {
     /// The smallest rectangle holding both.
     pub fn union(self, other: Rect) -> Rect {
         self.including(other.min).including(other.max)
+    }
+
+    /// Whether the two rectangles share a point, an edge or a corner included.
+    pub fn overlaps(self, other: Rect) -> bool {
+        self.min.x <= other.max.x && other.min.x <= self.max.x && self.min.y <= other.max.y && other.min.y <= self.max.y
     }
 
     /// Whether `p` lies inside or on the edge.
@@ -126,6 +135,9 @@ mod tests {
         assert!(r.contains(p(4, 2)));
         assert!(!r.contains(p(5, 0)));
         assert_eq!(r.union(Rect::from_corners(p(9, 9), p(8, 8))).max, p(9, 9));
+        let overlaps = |a: (i64, i64), b: (i64, i64)| r.overlaps(Rect::from_corners(p(a.0, a.1), p(b.0, b.1)));
+        assert!(overlaps((1, 0), (2, 1)) && overlaps((4, 2), (9, 9)) && overlaps((-5, -5), (9, 9)) && overlaps((2, -9), (2, 9)));
+        assert!(!overlaps((5, 0), (9, 1)) && !overlaps((0, 3), (4, 9)) && !overlaps((-9, 0), (-1, 1)) && !overlaps((0, -9), (4, -4)));
     }
 
     #[test]

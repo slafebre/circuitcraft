@@ -12,6 +12,7 @@ use std::f64::consts::{PI, TAU};
 /// circle whose diameter runs from `start` to `mid`. Three collinear points describe a straight
 /// line from `start` to `end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Arc {
     /// Where the arc begins.
     pub start: Point,

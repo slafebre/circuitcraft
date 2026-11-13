@@ -666,6 +666,7 @@ dependencies = [
 name = "circuitcraft-io"
 version = "0.0.1"
 dependencies = [
+ "circuitcraft-geom",
  "circuitcraft-model",
  "circuitcraft-units",
  "serde",
