@@ -68,7 +68,10 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 - **Assets** (icons, images, fonts, footprints, 3D models) are original or suitably licensed, and
   each one has a row in [ATTRIBUTION.md](ATTRIBUTION.md) in the same change (`cargo xtask assets`).
   Icons are drawn in code. Font files do not live in this repository.
-- **Large test corpora** live in a separate repository, never here.
+- **EAGLE**: the reader is written by hand from `eagle.dtd` and real files. Never commit the DTD
+  (CC BY-ND 3.0) or code generated from it.
+- **Test designs** are never committed. The corpus manifest pins upstream designs by commit and
+  checksum, and `cargo xtask corpus` fetches them for tests.
 
 ## Architecture rules
 
@@ -86,6 +89,9 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
 - **Rust only** in the apps: no handwritten JavaScript or TypeScript, no Electron, Tauri or web
   view. **Never break the web build.**
 - **Deterministic files.** Saving the same design twice gives byte-identical output.
+- **Native format.** A project is a folder: one `.ccproj` project file, one `.ccsch` file per
+  schematic sheet and one `.ccpcb` board file, all pretty-printed JSON with a stable key and
+  element order. Every file carries a format version.
 
 ## Quality gate
 
@@ -118,5 +124,7 @@ needs a maintainer's yes, recorded in ROADMAP.md, before it goes into that list.
 
 ## Contributions
 
-Contributions are licensed MIT OR Apache-2.0. Add or edit only your own entry in any contributor
+Contributions are licensed MIT OR Apache-2.0 and signed off with the Developer Certificate of
+Origin: every commit carries a `Signed-off-by:` line (`git commit -s`); see
+[CONTRIBUTING.md](CONTRIBUTING.md). Add or edit only your own entry in any contributor
 list, and only with that person's consent. Pull requests do not need to say an agent wrote them.

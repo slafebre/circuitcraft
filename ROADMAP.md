@@ -134,22 +134,22 @@ panelization, our own simulator behind the simulator interface.
 | Decision | Options or notes | Needed by |
 |---|---|---|
 | Reference boards | Candidates: a 2-layer microcontroller board; a 4-layer ESP32 board with USB-C; a board with a USB high-speed differential pair. Prefer open designs so the community can rebuild them | 0.3 |
-| Name | Check that "CircuitCraft" doesn't collide with an existing EDA product or trademark | before going public |
-| Native file extension and layout | Single file or project folder; `.ccpcb` in the README is a placeholder | 0.1 |
-| Contribution sign-off | CLA or DCO, chosen so a later move into the Crafting Apps family needs no relicensing | first outside contribution |
 | KiCad library content | CC-BY-SA-4.0 with an exception: check against the licence allowlist before importing it as bundled content | 0.5 |
-| EAGLE format documentation | Check the terms of the published DTD and documentation | 0.1 |
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
-| Polygon booleans | A permissively licensed library (Clipper2 is BSL-1.0, which is not on the Craft allowlist) | 0.1 |
 | Altium format work | Legal advice on studying Altium files made with your own licence, before any work starts | after 1.0 |
 | Altium reference install | A licence for black-box observation, with screenshots kept out of the repository | 0.3 |
-| Test corpus | A separate `circuitcraft-corpus` repository of permissively licensed EAGLE and KiCad designs | 0.1 |
 
 ## Decided
 
 | Date | Decision |
 |---|---|
+| 2026-11-13 | The name is CircuitCraft: the repository is public under it, and the check found only small, unrelated projects using it, no EDA product or trademark |
+| 2026-11-13 | Polygon booleans and offsets use `i_overlay` (MIT OR Apache-2.0, pure Rust) with its `i64` engine on `Nm` coordinates: union, intersection, difference and XOR with fill rules, round-join offsets, deterministic integer results, builds for wasm. Its `i32` engine would cap designs at ±1.07 m. Arcs are approximated by segments; `cavalier_contours` stays an option for exact arc offsets |
+| 2026-11-13 | EAGLE import is a hand-written, read-only XML reader, written from `eagle.dtd` and real files. The DTD is CC BY-ND 3.0 with a grant for programs that read or write the format; neither the DTD nor code generated from it goes into the repository |
+| 2026-11-13 | The test corpus is a manifest of upstream designs pinned by commit and checksum, fetched on demand by `cargo xtask corpus` and never redistributed by us. First candidates: SparkFun Qwiic Shield, RedBoard Turbo and MicroMod ESP32 (EAGLE, CC-BY-SA-4.0); Corne keyboard (KiCad, CC-BY-4.0); solo-hw (KiCad, CC-BY-SA-4.0); Bus Pirate 5 (KiCad, MIT); Olimex ESP32-POE and Antmicro Jetson Nano baseboard (KiCad, Apache-2.0) |
+| 2026-11-13 | Native format: a project folder with one file per document (`.ccproj` project, `.ccsch` schematic sheet, `.ccpcb` board), written as pretty-printed JSON with a stable order so a re-save is byte-identical. The browser build opens and saves a zipped project folder |
+| 2026-11-13 | Contributions are signed off with the Developer Certificate of Origin (`git commit -s`), described in CONTRIBUTING.md |
 | 2026-11-13 | Accept the licences egui and eframe pull in outside the allowlist, per crate: `Unicode-3.0` (ICU4X and Unicode data crates), `Zlib` (foldhash, slotmap, zlib-rs), `BSL-1.0` (clipboard-win, error-code). `cargo xtask licenses` enforces the list in `xtask/src/licenses.rs` |
 
 ## Risks
@@ -181,3 +181,4 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-12 | First version: audience, milestones 0.1 to 1.0, open decisions and risks |
 | 2026-11-13 | Workspace scaffold landed; stage moved to 0.1 in progress |
 | 2026-11-13 | egui licence exceptions accepted; licence check added to CI |
+| 2026-11-13 | 0.1 decisions settled: name, polygon library, EAGLE reader terms, test corpus, native format, DCO sign-off |
