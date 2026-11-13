@@ -1,0 +1,125 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit reviews for CircuitCraft. The rules below restate AGENTS.md for each part of the
+# tree; AGENTS.md is also loaded as a code guideline. When one changes, change the other.
+language: en-GB
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  poem: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # Dependabot bumps are checked by CI; skip CodeRabbit reviews on them.
+    ignore_usernames:
+      - "dependabot[bot]"
+
+  path_filters:
+    - "!Cargo.lock"
+    - "!target/**"
+    - "!dist/**"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        CircuitCraft must never crash. In non-test code flag: unwrap(), expect(), panic!,
+        unreachable!, todo!, unimplemented!, any `unsafe`, slice or map indexing with `[]` on
+        values that come from files, command parameters or MCP/control messages, unchecked
+        arithmetic on such values, `as` casts from floats that may be NaN or out of range,
+        allocations or loops sized by input without a cap, and recursion without a depth bound.
+        Errors must be returned as Result through the crate's error type.
+        Production crate roots (lib.rs, main.rs) must keep
+        #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)].
+        A fix for a crash needs a test that panicked before the fix.
+        Stored lengths and coordinates are `Nm` (i64 nanometres); flag f32/f64 used for stored
+        geometry. Floating point belongs only at the edges (parsing, display).
+        Clean room: flag code, comments or user-visible strings that look copied from another
+        EDA product (Altium, KiCad, EAGLE or others), and any mention of having read GPL, LGPL
+        or AGPL source (KiCad, FreeRouting, LibrePCB, gEDA/pcb-rnd).
+
+    - path: "crates/{units,geom,model,render,io,engine}/**"
+      instructions: |
+        These crates sit below the UI layer. They must not depend on egui, eframe, winit, wgpu,
+        rfd or any other UI or windowing crate. Dependencies go strictly downward through the
+        layers in xtask/src/layers.rs (L0 units, geom; L1 model; L2 library, rules, render;
+        L3 drc, pour, router, io, sim; L4 engine).
+
+    - path: "crates/io/**"
+      instructions: |
+        Every reader treats its input as hostile: bounded allocations, bounded recursion, no
+        panics on truncated, oversized or malformed files. Each reader needs tests with hostile
+        input. File formats must come from public specifications and synthetic test files;
+        flag anything that suggests porting another implementation.
+
+    - path: "crates/engine/src/commands.rs"
+      instructions: |
+        Everything is a command. Each CommandSpec needs a stable lower-case dotted id of our
+        own (not another product's command or process name), a label, a params description,
+        and a JSON run function with tests. Bad parameters must return EngineError::BadParams,
+        never panic. Programmatic calls never open dialogs.
+
+    - path: "crates/ui-egui/**"
+      instructions: |
+        The UI is thin. Panels read engine state and change the design only by running
+        commands (CircuitApp::run / Session::execute). Flag direct mutation of the model from UI
+        code. Colours come from the theme module. Icons are drawn in code, not loaded from files.
+
+    - path: "apps/circuitcraft-web/**"
+      instructions: |
+        No handwritten JavaScript or TypeScript, no Electron, Tauri or web view. The browser
+        build must keep compiling for wasm32-unknown-unknown; on wasm a panic aborts, so the
+        never-crash rules matter even more here.
+
+    - path: "**/Cargo.toml"
+      instructions: |
+        Every crate manifest keeps `[lints] workspace = true` and inherits the workspace package
+        fields. A new dependency's licence must be on the allowlist in AGENTS.md or be an
+        accepted per-crate exception in xtask/src/licenses.rs; ask for the licence when it is
+        unclear. Question git dependencies and large dependencies added for small tasks.
+
+    - path: "xtask/**"
+      instructions: |
+        These are the repository's guards (layers, assets, licences, wasm). Flag any change that
+        weakens a check unless the pull request says what it prevented and why it is safe to
+        relax. Guards must say why they exist.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        CI changes belong in their own pull request, not mixed into a feature or fix. Workflows
+        should keep minimal permissions and pinned major versions of actions.
+
+    - path: "**/*.{png,jpg,jpeg,gif,webp,svg,ico,icns,ttf,otf,ttc,woff,woff2,wav,mp3,step,stp,wrl,glb,gltf,obj}"
+      instructions: |
+        Every asset file needs a row in ATTRIBUTION.md with author, source and an allowed
+        licence, in the same pull request. Nothing may come from Altium, Autodesk, KiCad or any
+        other product's bundle, and screenshots of other products are never committed.
+
+    - path: "**/*.md"
+      instructions: |
+        Documentation must match the code: status lines, roadmap ticks and examples should be
+        true today. Commands in examples must exist. Keep British spelling (licence, colour).
+
+  tools:
+    clippy:
+      enabled: true
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+
+chat:
+  auto_reply: true
