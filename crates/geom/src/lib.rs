@@ -1,11 +1,55 @@
 //! Planar geometry on integer coordinates.
 //!
-//! Today this holds bounding boxes. Lines, arcs, polygons with arcs, booleans and offsets arrive
-//! with the board model in 0.1 (see ROADMAP.md).
+//! - [`Rect`]: bounding boxes.
+//! - [`Arc`]: circular arcs through three points, and their approximation by segments.
+//! - [`Contour`]: closed outlines of straight and arc edges; [`Polygon`]: filled areas with holes.
+//! - [`boolean`], [`offset`], [`stroke`]: polygon booleans, clearance offsets and track shapes,
+//!   on `i_overlay`'s 64-bit integer engine, deterministic on every platform.
+//!
+//! All coordinates are [`Nm`]; anything outside the ±10 m design range is an error, never a panic.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-pub use circuitcraft_units::{Nm, Point};
+mod arc;
+mod contour;
+mod region;
+
+pub use arc::{Arc, Circle};
+pub use circuitcraft_units::{Nm, Point, UnitError};
+pub use contour::{Contour, Edge, Polygon, area2};
+pub use region::{BoolOp, FillRule, boolean, offset, simplify, stroke};
 use serde::{Deserialize, Serialize};
+
+/// The most segments one arc is approximated with.
+pub const MAX_ARC_SEGMENTS: usize = 4_096;
+
+/// The most points one flattened contour may have; hostile input can't exhaust memory.
+pub const MAX_POINTS: usize = 4_000_000;
+
+/// A geometry operation failed.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum GeomError {
+    /// A coordinate or distance is outside the ±10 m design range.
+    #[error("coordinate or distance outside the design range")]
+    OutOfRange,
+    /// A contour would need more than [`MAX_POINTS`] points.
+    #[error("too many points (more than {MAX_POINTS})")]
+    TooManyPoints,
+    /// A stroke width must be positive.
+    #[error("invalid width {0:?}")]
+    InvalidWidth(Nm),
+}
+
+impl From<UnitError> for GeomError {
+    fn from(_: UnitError) -> Self {
+        GeomError::OutOfRange
+    }
+}
+
+/// Checks that a point lies inside the design range.
+pub(crate) fn check_point(p: Point) -> Result<(), GeomError> {
+    let max = circuitcraft_units::MAX_ABS;
+    if p.x.0.abs() > max || p.y.0.abs() > max { Err(GeomError::OutOfRange) } else { Ok(()) }
+}
 
 /// An axis-aligned rectangle, `min` at the lower left, `max` at the upper right (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -13,4 +13,6 @@ workspace = true
 
 [dependencies]
 circuitcraft-units = { workspace = true }
+i_overlay = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
