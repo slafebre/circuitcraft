@@ -643,6 +643,7 @@ dependencies = [
  "circuitcraft-mcp",
  "circuitcraft-ui-egui",
  "eframe",
+ "serde_json",
 ]
 
 [[package]]
@@ -670,6 +671,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "thiserror 2.0.21",
+ "zip",
 ]
 
 [[package]]

@@ -110,6 +110,7 @@ layers, wasm). Commit after each piece of work that builds.
 
 ```sh
 cargo run -p circuitcraft                                       # desktop app
+cargo run -p circuitcraft -- board.kicad_pcb                    # desktop app, opening a board
 cargo run -p circuitcraft -- --control                          # desktop app that agents can drive
 cargo run -p circuitcraft-cli -- commands                       # every command, as JSON
 cargo run -p circuitcraft-cli -- exec board.info                # run one command

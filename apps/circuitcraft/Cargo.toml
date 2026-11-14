@@ -15,4 +15,5 @@ workspace = true
 circuitcraft-engine = { workspace = true }
 circuitcraft-ui-egui = { workspace = true }
 circuitcraft-mcp = { workspace = true }
+serde_json = { workspace = true }
 eframe = { workspace = true, features = ["wgpu", "accesskit", "default_fonts", "clipboard", "links", "wayland", "x11"] }

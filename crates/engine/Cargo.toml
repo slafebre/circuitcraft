@@ -23,3 +23,6 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 serde_path_to_error = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+zip = { workspace = true }

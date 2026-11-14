@@ -110,11 +110,9 @@ pub fn unpack(bytes: &[u8], storage: &dyn Storage, into: &Path) -> Result<PathBu
     if !new_folder_path(into) || storage.kind(into).is_ok() {
         return Err(ArchiveError::Exists(into.to_owned()));
     }
-    // The zip reader lists every entry before it can be asked how many there are: refuse a zip
-    // with too many first, by the mark each entry of its directory starts with.
-    if central_entries(bytes) > MAX_FILES {
-        return Err(ArchiveError::TooLarge);
-    }
+    // The zip reader sets memory aside for as many entries as the zip says it has, before it
+    // reads any: refuse a zip that says it has too many first.
+    declared_within_budget(bytes)?;
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(malformed)?;
     if zip.len() > MAX_FILES {
         return Err(ArchiveError::TooLarge);
@@ -184,11 +182,64 @@ pub fn unpack(bytes: &[u8], storage: &dyn Storage, into: &Path) -> Result<PathBu
     })
 }
 
-/// How many entries a zip's directory has at most: the times the mark each entry starts with
-/// (`PK\x01\x02`) appears in it. A file's own bytes may hold the mark too, which only counts more.
-fn central_entries(bytes: &[u8]) -> usize {
-    // Counting stops one past the limit: that is enough to refuse.
-    bytes.windows(4).filter(|w| *w == b"PK\x01\x02").take(MAX_FILES + 1).count()
+/// The end-of-directory record's mark, and the mark of the locator a ZIP64 zip puts just before
+/// it to point at its ZIP64 record.
+const END: &[u8; 4] = b"PK\x05\x06";
+const LOCATOR64: &[u8; 4] = b"PK\x06\x07";
+
+/// How far from the end the zip reader looks for an end-of-directory record. `zip` 9.5 starts
+/// at the file's length less the size of its record type (32 bytes on 64-bit targets, 24 on
+/// wasm32), 4 and 65,536; this covers both, with room to spare.
+const END_WINDOW: usize = 65_536 + 64;
+
+/// The most end-of-directory records a zip may seem to have: the reader tries each, and an
+/// honest zip has one (a stored zip inside it may add another).
+const MAX_END_RECORDS: usize = 4;
+
+/// Whether the zip reader can be given these bytes: it sets memory aside for as many entries as
+/// the zip declares before it reads any, and tries every end record it finds.
+///
+/// Each end record the reader would try (it sits in the last [`END_WINDOW`] bytes, and its
+/// comment ends within the file) must declare at most [`MAX_FILES`] entries, as the reader
+/// counts them, and there may be at most [`MAX_END_RECORDS`] of them. A record that would send
+/// the reader to a ZIP64 record (a field at its largest value with a locator just before it) is
+/// refused: ZIP64 is for zips over 4 GB or 65,535 entries, far beyond what is unpacked here, and
+/// its records can declare any count and make the reader read them over and over.
+fn declared_within_budget(bytes: &[u8]) -> Result<(), ArchiveError> {
+    let at = |i: usize, mark: &[u8; 4]| bytes.get(i..i.saturating_add(4)) == Some(mark.as_slice());
+    let u16_at = |i: usize| bytes.get(i..i.saturating_add(2)).and_then(|b| b.try_into().ok()).map(u16::from_le_bytes);
+    let u32_at = |i: usize| bytes.get(i..i.saturating_add(4)).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+    let mut records = 0_usize;
+    for end in bytes.len().saturating_sub(END_WINDOW)..bytes.len() {
+        if !at(end, END) {
+            continue;
+        }
+        // Fields at 4 and 6: disk numbers; 8 and 10: entries on this disk and in all; 12 and 16:
+        // the directory's size and start; 20: the comment's length.
+        let (Some(disk), Some(cd_disk), Some(here), Some(total), Some(size), Some(start), Some(comment)) =
+            (u16_at(end + 4), u16_at(end + 6), u16_at(end + 8), u16_at(end + 10), u32_at(end + 12), u32_at(end + 16), u16_at(end + 20))
+        else {
+            continue;
+        };
+        // A record whose comment would run past the end is not one the reader tries.
+        if end.saturating_add(22).saturating_add(usize::from(comment)) > bytes.len() {
+            continue;
+        }
+        records += 1;
+        if records > MAX_END_RECORDS {
+            return Err(ArchiveError::TooLarge);
+        }
+        let zip64 = total == u16::MAX || size == u32::MAX || start == u32::MAX;
+        if zip64 && end.checked_sub(20).is_some_and(|locator| at(locator, LOCATOR64)) {
+            return Err(ArchiveError::Malformed("a ZIP64 zip, which is for zips over 4 GB; a project never needs one".to_owned()));
+        }
+        // The reader goes on to the next record unless this one is on one disk, as here.
+        let one_disk = disk == 0 && cd_disk == 0 && here == total;
+        if one_disk && usize::from(here) > MAX_FILES {
+            return Err(ArchiveError::TooLarge);
+        }
+    }
+    Ok(())
 }
 
 /// Whether `path` can name a new folder: a root or a drive, if any, and then plain names only,
@@ -315,6 +366,39 @@ mod tests {
         }
     }
 
+    /// A zip that hands its counts over to a ZIP64 record declaring `count` entries: a ZIP64
+    /// record, its locator and an end record, after one honest entry. The end record's counts
+    /// are `0xFFFF`, or 1 with only its directory's start at the largest value (`by_start`).
+    fn zip64_saying(count: u64, by_start: bool) -> Vec<u8> {
+        let mut bytes = zip_of(&[("a", b"1")]);
+        let end = bytes.windows(4).rposition(|w| w == END).expect("an end record");
+        bytes.truncate(end);
+        let record_at = bytes.len() as u64;
+        bytes.extend_from_slice(b"PK\x06\x06");
+        bytes.extend_from_slice(&44_u64.to_le_bytes()); // the size of what follows
+        bytes.extend_from_slice(&[45, 0, 45, 0]); // versions
+        bytes.extend_from_slice(&[0; 8]); // disks
+        bytes.extend_from_slice(&count.to_le_bytes()); // entries on this disk
+        bytes.extend_from_slice(&count.to_le_bytes()); // entries in all
+        bytes.extend_from_slice(&[0; 16]); // directory size and start
+        bytes.extend_from_slice(LOCATOR64);
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&record_at.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(END);
+        bytes.extend_from_slice(&[0; 4]);
+        if by_start {
+            bytes.extend_from_slice(&[1, 0, 1, 0]); // entries
+            bytes.extend_from_slice(&[0, 0, 0, 0]); // directory size
+            bytes.extend_from_slice(&[0xff; 4]); // directory start: see the ZIP64 record
+        } else {
+            bytes.extend_from_slice(&[0xff; 4]); // entries: see the ZIP64 record
+            bytes.extend_from_slice(&[0xff; 8]); // directory size and start: see the ZIP64 record
+        }
+        bytes.extend_from_slice(&[0; 2]); // no comment
+        bytes
+    }
+
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in entries {
@@ -409,6 +493,57 @@ mod tests {
     }
 
     #[test]
+    fn zips_the_reader_would_set_too_much_aside_for_are_refused_before_it_reads_them() {
+        let memory = MemoryStorage::default();
+        // A zip that says it has more entries than it may, before the zip reader sets memory
+        // aside for them.
+        let mut says_many = zip_of(&[("a", b"1")]);
+        let end = says_many.windows(4).rposition(|w| w == END).expect("an end record");
+        for count in [end + 8, end + 10] {
+            if let Some(field) = says_many.get_mut(count..count + 2) {
+                field.copy_from_slice(&60_000_u16.to_le_bytes());
+            }
+        }
+        assert!(matches!(unpack(&says_many, &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
+        // A ZIP64 zip is refused whatever it declares: by its count, or only by the size or start
+        // of its directory, and also when junk after it puts its end record far from the end.
+        let zip64 = |bytes: &[u8]| matches!(declared_within_budget(bytes), Err(ArchiveError::Malformed(m)) if m.contains("ZIP64"));
+        assert!(matches!(unpack(&zip64_saying(1_000_000_000, false), &memory, Path::new("/r")), Err(ArchiveError::Malformed(_))));
+        assert!(zip64(&zip64_saying(1, false)), "a ZIP64 zip says so, whatever it declares");
+        assert!(zip64(&zip64_saying(1_000_000_000, true)), "counts 1, start at its largest");
+        assert!(zip64(&[zip64_saying(1_000_000_000, false), vec![0; 65_538]].concat()), "far from the end");
+        // More end records than an honest zip has: the reader would try each.
+        let honest = zip_of(&[("a", b"1")]);
+        let end = honest.windows(4).rposition(|w| w == END).expect("an end record");
+        let record = honest.get(end..).unwrap_or_default().to_vec();
+        assert!(declared_within_budget(&honest).is_ok());
+        assert!(matches!(declared_within_budget(&[honest.clone(), record.repeat(MAX_END_RECORDS)].concat()), Err(ArchiveError::TooLarge)));
+        // Data that looks like directory entries, a ZIP64 locator or end records the reader
+        // would not use, stored as it is, doesn't count against an honest zip: an end record
+        // declaring 60,000 entries whose comment would run past the end, and one on disk 1.
+        let end_record = |disk: u16, comment: u16| {
+            let many = 60_000_u16.to_le_bytes();
+            [END.as_slice(), &disk.to_le_bytes(), &[0, 0], &many, &many, &[0; 8], &comment.to_le_bytes()].concat()
+        };
+        let lookalike = [
+            b"PK\x01\x02".repeat(2_000),
+            LOCATOR64.to_vec(),
+            b"PK\x06\x06".to_vec(),
+            u64::MAX.to_le_bytes().repeat(8),
+            end_record(0, u16::MAX),
+            end_record(1, 0),
+        ]
+        .concat();
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("a", stored).expect("start");
+        zip.write_all(&lookalike).expect("write");
+        let honest = zip.finish().expect("finish").into_inner();
+        assert!(honest.windows(4).filter(|w| *w == b"PK\x01\x02").count() > MAX_FILES, "the marks are in the zip");
+        assert!(unpack(&honest, &MemoryStorage::default(), Path::new("/fine")).is_ok());
+    }
+
+    #[test]
     fn zips_that_would_cost_too_much_or_clash_are_refused_before_writing() {
         let memory = MemoryStorage::default();
         // Another session makes the folder between the look and the making: this unpack finds
@@ -432,11 +567,6 @@ mod tests {
             assert!(matches!(unpack(&zip_of(&[("f", b"1")]), &memory, Path::new(into)), Err(ArchiveError::Exists(_))), "{into:?}");
         }
         assert!(new_folder_path(Path::new("/received/1")) && new_folder_path(Path::new("received")));
-        // Millions of directory entries are refused before the zip reader lists them.
-        let marks = b"PK\x01\x02".repeat(1_000_000);
-        let started = std::time::Instant::now();
-        assert!(matches!(unpack(&marks, &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // Names that differ only in case are one file on macOS and Windows.
         let cased = zip_of(&[("p/A.ccpcb", b"1"), ("p/a.ccpcb", b"2")]);
         assert!(matches!(unpack(&cased, &memory, Path::new("/r")), Err(ArchiveError::Malformed(_))));
