@@ -5,6 +5,8 @@
 //! whether it only reports, and `execute` runs any of them with JSON parameters.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod control;
+
 use circuitcraft_engine::{COMMANDS, Session};
 use serde_json::{Value, json};
 use std::io::{BufRead, Read as _, Write};

@@ -5,6 +5,7 @@
 use circuitcraft_engine::Session;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -44,7 +45,13 @@ enum Cmd {
         layers: Vec<String>,
     },
     /// Serve the Model Context Protocol on standard input and output.
-    Mcp,
+    Mcp {
+        /// Drive the board open in the running app (started with `circuitcraft --control`)
+        /// instead of a headless session of this command's own. The address is the one the app
+        /// listens on, as its control file says when left out.
+        #[arg(long, value_name = "ADDRESS")]
+        connect: Option<Option<SocketAddr>>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -61,7 +68,10 @@ fn main() -> ExitCode {
             let layers = (!layers.is_empty()).then_some(layers);
             run(&mut session, "file.render", &json!({ "path": out, "size": size, "layers": layers }))
         }),
-        Cmd::Mcp => circuitcraft_mcp::serve(&mut session, std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string()),
+        Cmd::Mcp { connect: None } => {
+            circuitcraft_mcp::serve(&mut session, std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string())
+        }
+        Cmd::Mcp { connect: Some(address) } => connect(address),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -70,6 +80,25 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Bridges MCP on standard input and output to the running app's control channel, with the
+/// address and token from the app's control file. A different `address` from the file's is
+/// refused, so the token goes only where the app is.
+fn connect(address: Option<SocketAddr>) -> Result<(), String> {
+    use circuitcraft_mcp::control;
+    let file = control::control_file().ok_or("there is no folder for the app's control file (HOME or LOCALAPPDATA is not set)")?;
+    let (listening, secrets) = control::read_control_file(&file).map_err(|e| format!("{e}; is CircuitCraft running with --control?"))?;
+    if let Some(asked) = address
+        && asked != listening
+    {
+        return Err(format!("the running app listens on {listening}, not on {asked}"));
+    }
+    control::bridge(listening, &secrets, std::io::stdin(), std::io::stdout().lock()).map_err(|e| match e {
+        // Most often the app has ended and left its control file behind.
+        control::ControlError::Io(_) => format!("{e}, at {listening}; is CircuitCraft still running with --control?"),
+        e => e.to_string(),
+    })
 }
 
 fn run(session: &mut Session, id: &str, params: &Value) -> Result<(), String> {
