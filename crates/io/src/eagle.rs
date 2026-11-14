@@ -522,6 +522,12 @@ impl<'a> Eagle<'a> {
         // A smashed element places its name and value itself; the package's own are not shown.
         let smashed = element.attr("smashed") == Some("yes");
         for part in &package.children {
+            // A part can place more than it weighs (an octagon pad holds its corners three
+            // times), so one large package could pass the limit many times over before the
+            // caller looks: stop at the part that passes it.
+            if self.placed > MAX_PLACED {
+                return Some(()); // the caller stops the import
+            }
             if self.package_part(part, smashed, &mut footprint).is_none() {
                 self.notes.add(&format!("package {} that could not be read left out", part.name));
             }
@@ -1280,6 +1286,18 @@ pub(crate) mod tests {
             (0..999).map(|n| format!("<pad name=\"{n}\" x=\"0\" y=\"0\" drill=\"1\" diameter=\"2\" shape=\"octagon\"/>")).collect();
         assert_eq!(read_board(&board(&octagons, 45), "x").map(|read| read.board.footprints.len()), Ok(45));
         assert!(refused(&board(&octagons, 46)));
+        // One package of 100,000 such pads would place 2,200,000. It is refused, and its
+        // conversion stops at the pad that passes what a board may place, not after the last.
+        let crowd = board(&"<pad name=\"1\" x=\"0\" y=\"0\" drill=\"1\" diameter=\"2\" shape=\"octagon\"/>".repeat(100_000), 1);
+        assert!(refused(&crowd));
+        let root = xml::parse(&crowd).expect("xml");
+        let drawing = root.child("drawing").expect("drawing");
+        let inner = drawing.child("board").expect("board");
+        let mut eagle = Eagle::new(&crowd, "x", drawing, inner);
+        let element = inner.child("elements").and_then(|elements| elements.children.first()).expect("element");
+        assert_eq!(eagle.element(element), Some(()));
+        assert!((MAX_PLACED + 1..=MAX_PLACED + 21).contains(&eagle.placed), "placed {}", eagle.placed);
+        assert!(eagle.board.footprints.is_empty());
         // Short attributes weigh nothing, however many a part has: what counts is what the
         // board gets.
         let junk: String = (0..60).map(|i| format!(" a{i}=\"1\"")).collect();
