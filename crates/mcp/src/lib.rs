@@ -125,8 +125,14 @@ fn call_tool(session: &mut Session, params: &Value) -> Result<Value, (i64, Strin
     };
     // Command failures are tool results with isError, so the agent can read and react to them.
     Ok(match outcome {
-        Ok(v) => {
-            json!({ "content": [{ "type": "text", "text": v.to_string() }], "structuredContent": wrap(v), "isError": false })
+        Ok(mut v) => {
+            // A PNG picture comes as an image the agent can look at, and is not repeated as text.
+            let png = (v["format"] == "png").then(|| v.as_object_mut().and_then(|o| o.remove("png"))).flatten();
+            let mut content = vec![json!({ "type": "text", "text": v.to_string() })];
+            if let Some(Value::String(data)) = png {
+                content.push(json!({ "type": "image", "data": data, "mimeType": "image/png" }));
+            }
+            json!({ "content": content, "structuredContent": wrap(v), "isError": false })
         }
         Err(e) => json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true }),
     })
@@ -146,6 +152,25 @@ mod tests {
         let mut out = Vec::new();
         serve(&mut s, input.as_bytes(), &mut out).expect("serve");
         String::from_utf8(out).expect("utf8").lines().map(|l| serde_json::from_str(l).expect("json")).collect()
+    }
+
+    #[test]
+    fn a_png_picture_comes_as_an_image() {
+        let replies = run(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"command":"view.render","params":{"format":"png","size":32}}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"execute","arguments":{"command":"view.render"}}}"#,
+            "\n",
+        ));
+        let png = &replies[0]["result"];
+        assert_eq!((&png["content"][1]["type"], &png["content"][1]["mimeType"]), (&json!("image"), &json!("image/png")));
+        assert!(png["content"][1]["data"].as_str().is_some_and(|d| d.starts_with("iVBORw0KGgo")));
+        assert!(png["structuredContent"].get("png").is_none() && !png["content"][0]["text"].as_str().unwrap_or_default().contains("iVBOR"));
+        assert_eq!(png["structuredContent"]["width"], 32, "an empty board is square");
+        // An SVG stays text.
+        let svg = &replies[1]["result"];
+        assert_eq!(svg["content"].as_array().map(Vec::len), Some(1));
+        assert!(svg["structuredContent"]["svg"].as_str().is_some_and(|s| s.starts_with("<svg ")));
     }
 
     #[test]

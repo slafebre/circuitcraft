@@ -1,10 +1,44 @@
-//! Layer colours and, from 0.1, display lists for the board view.
+//! Drawing a board without a window: display lists, the stroke font, and SVG and PNG output.
 //!
-//! This crate knows nothing about egui or wgpu: it turns the model into plain data that any front
-//! end can draw. Colours here are CircuitCraft's own defaults.
+//! This crate knows nothing about egui or wgpu. [`display_list`] turns a board into layers of
+//! simple shapes that any front end can draw; [`svg`] and [`png`] draw them into files, for the
+//! CLI, MCP and CI. Colours here are CircuitCraft's own defaults.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod display;
+pub mod font;
+mod raster;
+mod svg;
+
+pub use display::{
+    AREA_LINE_WIDTH, BACKGROUND, DisplayList, Group, GroupKind, HAIRLINE, HIGHLIGHT, OUTLINE_WIDTH, Options, Shape, TOLERANCE, display_list,
+};
+pub use raster::{MAX_PIXELS, MAX_SIDE, png};
+pub use svg::svg;
+
 use circuitcraft_model::{Layer, LayerKind};
+
+/// A picture could not be made.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RenderError {
+    /// The picture would be larger than [`MAX_SIDE`] pixels on a side or [`MAX_PIXELS`] in all.
+    #[error("a picture {0} by {1} pixels is larger than this build makes")]
+    TooLarge(u64, u64),
+    /// A picture must be at least one pixel wide.
+    #[error("a picture must be at least one pixel wide")]
+    Empty,
+    /// Encoding the picture failed.
+    #[error("could not encode the picture: {0}")]
+    Encode(String),
+}
+
+impl Rgba {
+    /// The colour as `#rrggbb`, without its opacity.
+    pub fn hex(self) -> String {
+        let [r, g, b, _] = self.0;
+        format!("#{r:02x}{g:02x}{b:02x}")
+    }
+}
 
 /// An sRGB colour with straight alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 circuitcraft-io = { workspace = true }
 circuitcraft-model = { workspace = true }
+circuitcraft-render = { workspace = true }
 circuitcraft-units = { workspace = true }
 circuitcraft-geom = { workspace = true }
 serde_json = { workspace = true }

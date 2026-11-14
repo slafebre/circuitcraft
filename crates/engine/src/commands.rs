@@ -120,6 +120,19 @@ pub static COMMANDS: &[CommandSpec] = &[
     .menu("View/Single Layer Mode"),
     spec("view.highlight", "Highlight Net", "Highlights a net, or none. Returns the view.", typed!(view_highlight, ViewHighlight)),
     spec(
+        "view.render",
+        "Picture of the Board",
+        "Draws the board as the view shows it (its visible layers, the highlighted net, and the active layer over the others once one has been chosen), or the layers given, without a window. Returns {format, bounds, svg} for an SVG, or {format, bounds, width, height, png} for a PNG, where png is base64; bounds is [left, bottom, right, top] in millimetres of what is drawn (null when nothing is), and the picture leaves a margin around it. Over MCP a PNG comes as an image.",
+        typed!(view_render, Render),
+    )
+    .read_only(),
+    spec(
+        "file.render",
+        "Save Picture of the Board",
+        "Draws the board as view.render does and saves the picture to a file. Returns {path, format, bytes}.",
+        typed!(file_render, FileRender),
+    ),
+    spec(
         "project.info",
         "Project Information",
         "Returns what the session has open: {name, folder, project, documents: [{kind, name, file, modified, revision, selected, view: {activeLayer, singleLayer, highlight, hiddenLayers}}]}.",
@@ -757,6 +770,128 @@ struct ViewHighlight {
 fn view_highlight(s: &mut Session, p: ViewHighlight) -> Result<Value, EngineError> {
     s.state_mut().view.highlight = net(s.board(), p.net.as_deref())?;
     Ok(view(s))
+}
+
+/// A kind of picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum PictureFormat {
+    /// SVG: lines and shapes at the board's real size, the same bytes for the same board.
+    Svg,
+    /// PNG: pixels.
+    Png,
+}
+
+impl PictureFormat {
+    fn name(self) -> &'static str {
+        match self {
+            PictureFormat::Svg => "svg",
+            PictureFormat::Png => "png",
+        }
+    }
+}
+
+/// The longer side of a PNG when no size is given, in pixels.
+const PICTURE_SIZE: u32 = 1_600;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Render {
+    /// "svg" or "png"; "svg" when left out.
+    format: Option<PictureFormat>,
+    /// The longer side of a PNG in pixels, 1 to 16384; 1600 when left out. The other side
+    /// follows from the board's proportions. A picture may have at most 16,777,216 pixels.
+    size: Option<u32>,
+    /// The layers to draw, by name; the layers the view shows when left out.
+    layers: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FileRender {
+    /// The file to write: an existing file is replaced.
+    path: String,
+    /// "svg" or "png"; from the file's extension (.svg or .png) when left out.
+    format: Option<PictureFormat>,
+    /// The longer side of a PNG in pixels, as for view.render.
+    size: Option<u32>,
+    /// The layers to draw, by name; the layers the view shows when left out.
+    layers: Option<Vec<String>>,
+}
+
+/// What a picture of the board shows: the layers given, or what the view shows.
+fn render_options(s: &Session, layers: Option<&[String]>) -> Result<circuitcraft_render::Options, EngineError> {
+    let board = s.board();
+    let visible = match layers {
+        Some(names) => names.iter().map(|name| layer(board, name)).collect::<Result<_, _>>()?,
+        None => board.stack.layers.iter().map(|l| l.id).filter(|&id| s.layer_visible(id)).collect(),
+    };
+    // Only a layer someone chose is raised over the others: a board that was just opened is drawn
+    // in the order it is built, its silkscreen over its copper.
+    let active = s.state().and_then(|state| state.view.active).filter(|&id| board.stack.get(id).is_some());
+    Ok(circuitcraft_render::Options { visible, active, highlight: s.highlight(), tolerance: circuitcraft_render::TOLERANCE })
+}
+
+/// A picture of the board, and what it shows.
+fn picture(s: &Session, format: PictureFormat, size: Option<u32>, layers: Option<&[String]>) -> Result<(Vec<u8>, Value), EngineError> {
+    let list = circuitcraft_render::display_list(s.board(), &render_options(s, layers)?);
+    let bounds = list.bounds.map(|b| [b.min.x.to_mm(), b.min.y.to_mm(), b.max.x.to_mm(), b.max.y.to_mm()]);
+    let mut about = json!({ "format": format.name(), "bounds": bounds });
+    let bytes = match format {
+        PictureFormat::Svg => circuitcraft_render::svg(&list).into_bytes(),
+        PictureFormat::Png => {
+            let png = circuitcraft_render::png(&list, size.unwrap_or(PICTURE_SIZE)).map_err(|e| bad(e.to_string()))?;
+            about["width"] = json!(png_size(&png, 16));
+            about["height"] = json!(png_size(&png, 20));
+            png
+        }
+    };
+    Ok((bytes, about))
+}
+
+/// The width (`at` 16) or the height (`at` 20) a PNG says it has: after the signature and the
+/// header's length and type come the width and the height, four bytes each.
+fn png_size(png: &[u8], at: usize) -> Option<u32> {
+    let bytes: [u8; 4] = png.get(at..at + 4)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
+}
+
+fn view_render(s: &mut Session, p: Render) -> Result<Value, EngineError> {
+    let format = p.format.unwrap_or(PictureFormat::Svg);
+    let (bytes, mut about) = picture(s, format, p.size, p.layers.as_deref())?;
+    about[format.name()] = match format {
+        PictureFormat::Svg => json!(String::from_utf8_lossy(&bytes)),
+        PictureFormat::Png => json!(base64(&bytes)),
+    };
+    Ok(about)
+}
+
+fn file_render(s: &mut Session, p: FileRender) -> Result<Value, EngineError> {
+    let extension = Path::new(&p.path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    let format = match (p.format, extension.as_deref()) {
+        (Some(format), _) => format,
+        (None, Some("svg")) => PictureFormat::Svg,
+        (None, Some("png")) => PictureFormat::Png,
+        (None, _) => return Err(bad("`format` is needed for a file that doesn't end in .svg or .png")),
+    };
+    let (bytes, _) = picture(s, format, p.size, p.layers.as_deref())?;
+    s.storage().write(Path::new(&p.path), &bytes).map_err(|e| failed(format!("cannot write {}: {e}", p.path)))?;
+    Ok(json!({ "path": p.path, "format": format.name(), "bytes": bytes.len() }))
+}
+
+/// Bytes as base64 (RFC 4648, with padding).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let n = (b(0) << 16) | (b(1) << 8) | b(2);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            let digit = ALPHABET.get(((n >> shift) & 63) as usize).copied().unwrap_or(b'=');
+            out.push(if i <= chunk.len() { char::from(digit) } else { '=' });
+        }
+    }
+    out
 }
 
 fn project_info(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
@@ -1743,5 +1878,95 @@ mod tests {
         let mut s = on_disk();
         let r = s.execute("file.detect", &json!({ "path": "/definitely/not/here.brd" }));
         assert!(matches!(r, Err(EngineError::Failed(_))));
+    }
+
+    #[test]
+    fn base64_is_the_standard_alphabet_with_padding() {
+        assert_eq!([base64(b""), base64(b"f"), base64(b"fo"), base64(b"foo"), base64(b"foob")], ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg=="]);
+        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    #[test]
+    fn the_board_is_drawn_as_the_view_shows_it() {
+        let mut s = Session::in_memory();
+        let empty = s.execute("view.render", &Value::Null).expect("render");
+        assert_eq!((&empty["format"], &empty["bounds"]), (&json!("svg"), &Value::Null));
+        assert!(empty["svg"].as_str().is_some_and(|svg| svg.starts_with("<svg ") && svg.ends_with("</svg>\n")));
+        s.execute("net.add", &json!({ "name": "GND" })).expect("net");
+        s.execute("track.add", &json!({ "layer": "Bottom Copper", "width": 0.5, "from": [0, 0], "to": [10, 0], "net": "GND" })).expect("track");
+        let drawn = s.execute("view.render", &Value::Null).expect("render");
+        assert_eq!(drawn["bounds"], json!([-0.25, -0.25, 10.25, 0.25]));
+        let svg = |v: &Value| v["svg"].as_str().unwrap_or_default().to_owned();
+        assert!(svg(&drawn).contains(r#"data-name="Bottom Copper""#));
+        // What the view hides is not drawn; what it highlights is laid over.
+        s.execute("view.highlight", &json!({ "net": "GND" })).expect("highlight");
+        assert!(svg(&s.execute("view.render", &Value::Null).expect("render")).contains(r#"data-name="Bottom Copper: highlight""#));
+        s.execute("view.layer", &json!({ "layer": "Bottom Copper", "visible": false })).expect("hide");
+        let hidden = s.execute("view.render", &Value::Null).expect("render");
+        assert!(!svg(&hidden).contains("Bottom Copper") && hidden["bounds"].is_null());
+        // Layers asked for by name are drawn whatever the view shows.
+        let asked = s.execute("view.render", &json!({ "layers": ["Bottom Copper"] })).expect("render");
+        assert!(svg(&asked).contains(r#"data-name="Bottom Copper""#));
+        // A PNG, as base64 with its size.
+        let png = s.execute("view.render", &json!({ "format": "png", "size": 205, "layers": ["Bottom Copper"] })).expect("png");
+        // 10.5 by 0.5 mm and a millimetre around: 12.5 by 2.5.
+        assert_eq!((&png["width"], &png["height"]), (&json!(205), &json!(41)));
+        // A board standing up is sized by its height: the default size fits a long, narrow board.
+        s.execute("track.add", &json!({ "layer": "Bottom Copper", "width": 0.25, "from": [0, 0], "to": [0, -150] })).expect("track");
+        let tall = s.execute("view.render", &json!({ "format": "png", "layers": ["Bottom Copper"] })).expect("png");
+        assert_eq!(tall["height"], 1_600);
+        assert!(png["png"].as_str().is_some_and(|data| data.starts_with("iVBORw0KGgo")), "the PNG signature");
+        // Rendering reports; it changes nothing.
+        assert!(crate::command("view.render").is_some_and(|c| c.read_only));
+        assert_eq!(s.doc().undo_label(), Some("Add Track"));
+    }
+
+    #[test]
+    fn only_a_chosen_layer_is_raised_over_the_others() {
+        let mut s = Session::in_memory();
+        s.execute("settings.set", &json!({ "tentVias": false })).expect("settings");
+        s.execute("via.add", &json!({ "at": [10, 0] })).expect("via");
+        let svg = |s: &mut Session| s.execute("view.render", &Value::Null).expect("render")["svg"].as_str().unwrap_or_default().to_owned();
+        let at = |svg: &str, name: &str| svg.find(&format!(r#"data-name="{name}""#));
+        // Nothing chosen: the order the board is built in, the top mask over the top copper.
+        let built = svg(&mut s);
+        assert!(at(&built, "Top Copper").is_some() && at(&built, "Top Copper") < at(&built, "Top Solder Mask"));
+        s.execute("view.active", &json!({ "layer": "Top Copper" })).expect("active");
+        let chosen = svg(&mut s);
+        assert!(at(&chosen, "Top Solder Mask") < at(&chosen, "Top Copper"), "the chosen layer over the mask");
+    }
+
+    #[test]
+    fn bad_render_requests_are_refused() {
+        let mut s = Session::in_memory();
+        let bad = |s: &mut Session, id: &str, p: Value| matches!(s.execute(id, &p), Err(EngineError::BadParams(_)));
+        assert!(bad(&mut s, "view.render", json!({ "format": "gif" })));
+        assert!(bad(&mut s, "view.render", json!({ "layers": ["Nope"] })));
+        assert!(bad(&mut s, "view.render", json!({ "format": "png", "size": 0 })));
+        assert!(bad(&mut s, "view.render", json!({ "format": "png", "size": 100_000 })));
+        assert!(bad(&mut s, "view.render", json!({ "format": "png", "size": -1 })));
+        assert!(bad(&mut s, "view.render", json!({ "format": "png", "width": 100 })), "the size is the longer side, not a width");
+        assert!(bad(&mut s, "file.render", json!({ "path": "/work/board.jpg" })));
+        assert!(bad(&mut s, "file.render", json!({})));
+    }
+
+    #[test]
+    fn a_picture_is_saved_to_a_file_of_its_kind() {
+        let memory = Arc::new(MemoryStorage::default());
+        let mut s = sharing(&memory);
+        s.execute("track.add", &json!({ "layer": "Top Copper", "width": 0.5, "from": [0, 0], "to": [10, 0] })).expect("track");
+        let svg = s.execute("file.render", &json!({ "path": "/work/board.svg" })).expect("svg");
+        assert_eq!((&svg["format"], path(&svg["path"])), (&json!("svg"), at("/work/board.svg")));
+        let png = s.execute("file.render", &json!({ "path": "/work/Board.PNG", "size": 64 })).expect("png");
+        assert_eq!(png["format"], "png");
+        let picture = s.execute("file.render", &json!({ "path": "/work/picture", "format": "png" })).expect("png");
+        let files = memory.snapshot();
+        let written = |name: &str| files.iter().find(|(p, _)| p.ends_with(name)).map(|(_, bytes)| bytes.clone()).unwrap_or_default();
+        assert!(written("board.svg").starts_with(b"<svg "));
+        assert_eq!(svg["bytes"], json!(written("board.svg").len()));
+        assert!(written("Board.PNG").starts_with(b"\x89PNG") && written("picture").starts_with(b"\x89PNG"));
+        assert_eq!(picture["bytes"], json!(written("picture").len()));
+        // It changes no board and nothing the board is kept for.
+        assert!(s.modified() && s.folder().is_none());
     }
 }

@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn a_read_only_command_changes_nothing() {
         let read_only: Vec<&str> = COMMANDS.iter().filter(|c| c.read_only).map(|c| c.id).collect();
-        assert_eq!(read_only, ["recovery.list", "select.list", "project.info", "board.info", "file.detect", "commands", "about"]);
+        assert_eq!(read_only, ["recovery.list", "select.list", "view.render", "project.info", "board.info", "file.detect", "commands", "about"]);
         // A session with something of everything: a saved project, unsaved work that has been
         // autosaved, an undone edit, a selection, a view, and unsaved work left by another session.
         let files = std::sync::Arc::new(circuitcraft_io::storage::MemoryStorage::with_recovery());

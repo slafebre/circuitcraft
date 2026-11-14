@@ -30,6 +30,19 @@ enum Cmd {
         /// The file to look at.
         file: String,
     },
+    /// Draw a board into an SVG or PNG picture, without a window.
+    Render {
+        /// The board: a project folder, a .ccproj or .ccpcb file, a KiCad .kicad_pcb or an EAGLE .brd.
+        file: String,
+        /// The picture to write; its extension (.svg or .png) says which kind.
+        out: String,
+        /// The longer side of a PNG in pixels.
+        #[arg(long)]
+        size: Option<u32>,
+        /// A layer to draw, by name; give it once for each layer. Every layer when left out.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+    },
     /// Serve the Model Context Protocol on standard input and output.
     Mcp,
 }
@@ -44,6 +57,10 @@ fn main() -> ExitCode {
             Err(e) => Err(format!("parameters are not valid JSON: {e}")),
         },
         Cmd::Info { file } => run(&mut session, "file.detect", &json!({ "path": file })),
+        Cmd::Render { file, out, size, layers } => session.execute("file.open", &json!({ "path": file })).map_err(|e| e.to_string()).and_then(|_| {
+            let layers = (!layers.is_empty()).then_some(layers);
+            run(&mut session, "file.render", &json!({ "path": out, "size": size, "layers": layers }))
+        }),
         Cmd::Mcp => circuitcraft_mcp::serve(&mut session, std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string()),
     };
     match outcome {
