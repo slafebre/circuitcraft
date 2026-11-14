@@ -15,6 +15,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
+mod query;
+use query::{BoardQuery, ItemInfo, board_query, item_info};
+
 /// A command that reads its parameters into `$params`: its schema, and the entry point that
 /// parses them and runs `$run`. Both come from the one type, so they can't disagree.
 macro_rules! typed {
@@ -167,6 +170,20 @@ pub static COMMANDS: &[CommandSpec] = &[
         typed!(board_info, NoParams),
     )
     .menu("Reports/Board Information")
+    .read_only(),
+    spec(
+        "board.query",
+        "Find Items",
+        "Lists what is on the board, filtered by kind, net, layer, footprint reference and a rectangle, all of which must match. Returns {total, offset, items, next}: total is how many match, items holds at most limit of them from offset on (fewer when they would pass 1 MiB of JSON), and next is the offset of the next page (null after the last). Items come kind by kind (nets, footprints, pads, tracks, vias, zones, keepouts, holes, texts, drawings), each in id order, each with its kind, its id (a pad has none: it gives its footprint's id, reference, number and index) and its main properties, lengths in millimetres and layers and nets by name. item.info gives one in full.",
+        typed!(board_query, BoardQuery),
+    )
+    .read_only(),
+    spec(
+        "item.info",
+        "Item Information",
+        "Returns one item or net in full, by id, with its kind. A footprint comes with its assembly attributes and its pads (where each is on the board, its layers, net, copper shapes and hole), texts and drawings, placed on the board; a zone or keepout with its outline, a drawing with its geometry, a net with how many pads, tracks, vias and zones it has. Lengths are millimetres. Lists stop before they pass 1 MiB of JSON, a footprint's pads last, and truncated then says so; board.query pages through a footprint's pads.",
+        typed!(item_info, ItemInfo),
+    )
     .read_only(),
     spec(
         "file.detect",
