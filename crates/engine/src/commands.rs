@@ -5,8 +5,8 @@
 //! the type doesn't have is refused, and so is one of the wrong kind.
 
 use crate::{CommandSpec, EngineError, RunFn, Session};
-use circuitcraft_io::native;
 use circuitcraft_io::storage::Kind;
+use circuitcraft_io::{Format, native};
 use circuitcraft_model::{Board, DesignSettings, Hole, ItemId, MAX_ITEMS, MAX_OUTLINE_GAP, NetId, TrackPath};
 use circuitcraft_units::{Nm, Point};
 use schemars::JsonSchema;
@@ -41,7 +41,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     spec(
         "file.open",
         "Open Project",
-        "Opens a project folder, a .ccproj project file or a .ccpcb board file, replacing the open board, undoably. Returns {name, folder}.",
+        "Opens a project folder, a .ccproj project file or a .ccpcb board file, replacing the open board, undoably. A KiCad .kicad_pcb or EAGLE .brd board is imported instead: it becomes a new board without a folder, its file is never written, and file.save needs a path. Returns {name, folder}, and for an imported board also {imported, notes}, where notes lists what the import left out or approximated.",
         typed!(file_open, FileOpen),
     ),
     spec(
@@ -248,9 +248,32 @@ struct FileOpen {
 }
 
 fn file_open(s: &mut Session, p: FileOpen) -> Result<Value, EngineError> {
+    if let Some((imported, format)) = import(s, Path::new(&p.path))? {
+        let notes = imported.notes.lines();
+        // A new board with unsaved work and no files of its own: saving it never touches the
+        // file it came from.
+        s.replace_board("Open", imported.board, None, false);
+        return Ok(json!({ "name": s.board().name, "folder": null, "imported": format.name(), "notes": notes }));
+    }
     let (board, files) = native::open(s.storage(), Path::new(&p.path)).map_err(failed)?;
     s.replace_board("Open", board, Some(files), true);
     Ok(json!({ "name": s.board().name, "folder": s.folder().map(|f| f.to_string_lossy()) }))
+}
+
+/// Reads `path` as another program's board, if it is a file that holds one: `None` for a folder,
+/// one of our own files or anything unrecognised, which `file.open` then opens as before. What
+/// the file holds decides, not what it is called.
+fn import(s: &Session, path: &Path) -> Result<Option<(circuitcraft_io::import::Imported, Format)>, EngineError> {
+    // A folder, or anything else that isn't a file to read, is for `native::open` to open or refuse.
+    let Ok(text) = native::read_text(s.storage(), path) else { return Ok(None) };
+    let format = match circuitcraft_io::detect(text.as_bytes()) {
+        Some(format @ (Format::KicadPcb | Format::Eagle)) => format,
+        _ => return Ok(None),
+    };
+    // A board has no name of its own in these files: it gets the file's.
+    let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let imported = circuitcraft_io::import_board(&text, &name).map_err(|e| failed(format!("{}: {e}", path.display())))?;
+    Ok(Some((imported, format)))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -817,10 +840,12 @@ fn file_detect(s: &mut Session, p: FileDetect) -> Result<Value, EngineError> {
     Ok(json!({
         "path": p.path,
         "format": format.map(|f| f.name()),
-        "importable": matches!(format, Some(circuitcraft_io::Format::CircuitCraftBoard | circuitcraft_io::Format::CircuitCraftProject)),
+        "importable": matches!(format, Some(Format::CircuitCraftBoard | Format::CircuitCraftProject | Format::KicadPcb | Format::Eagle)),
         "note": match format {
-            Some(circuitcraft_io::Format::CircuitCraftBoard | circuitcraft_io::Format::CircuitCraftProject) => "open it with file.open",
-            Some(_) => "recognised; import arrives in 0.1",
+            Some(Format::CircuitCraftBoard | Format::CircuitCraftProject) => "open it with file.open",
+            Some(Format::KicadPcb) => "file.open imports it as a new board; the file itself is never written",
+            Some(Format::Eagle) => "file.open imports it as a new board if it is a board (not a schematic or a library); the file itself is never written",
+            Some(_) => "recognised; not imported yet",
             None => "not a format CircuitCraft recognises",
         },
     }))
@@ -939,6 +964,59 @@ mod tests {
         let mut s = on_disk();
         let r = s.execute("file.detect", &json!({ "path": path.to_string_lossy() })).expect("detect");
         assert_eq!(r["format"], "KiCad board");
+    }
+
+    #[test]
+    fn another_programs_board_opens_as_a_new_board_without_a_folder() {
+        let dir = TempDir::new("import");
+        std::fs::create_dir_all(&dir.0).expect("temp dir");
+        let kicad = dir.0.join("Blinky v2.kicad_pcb");
+        let source = "(kicad_pcb (version 20221018) (net 1 \"GND\")\n  (segment (start 0 0) (end 10 0) (width 0.25) (layer \"F.Cu\") (net 1))\n  (dimension 1))\n";
+        std::fs::write(&kicad, source).expect("write");
+        let mut s = on_disk();
+        s.execute("net.add", &json!({ "name": "KEEP" })).expect("net");
+        let detected = s.execute("file.detect", &json!({ "path": kicad.to_string_lossy() })).expect("detect");
+        assert_eq!((&detected["format"], &detected["importable"]), (&json!("KiCad board"), &json!(true)));
+        // The board is named for the file, has no folder, and says what the import left out.
+        let opened = s.execute("file.open", &json!({ "path": kicad.to_string_lossy() })).expect("open");
+        assert_eq!(opened, json!({ "name": "Blinky v2", "folder": null, "imported": "KiCad board", "notes": ["dimension left out"] }));
+        let info = s.execute("board.info", &Value::Null).expect("info");
+        assert_eq!((&info["counts"]["tracks"], &info["counts"]["nets"], &info["folder"]), (&json!(1), &json!(1), &Value::Null));
+        // It is unsaved work from the start: nothing on disk holds it yet.
+        assert!(s.modified());
+        // Saving needs a place of its own, and the file the board came from is never written.
+        assert!(matches!(s.execute("file.save", &json!({})), Err(EngineError::BadParams(_))));
+        let folder = dir.0.join("Saved");
+        s.execute("file.save", &json!({ "path": folder.to_string_lossy() })).expect("save");
+        s.execute("file.save", &json!({})).expect("save again, to the project");
+        assert_eq!(std::fs::read_to_string(&kicad).expect("source"), source);
+        assert_eq!(std::fs::read_dir(&dir.0).expect("dir").count(), 2, "the source file and the new project folder");
+        let mut other = on_disk();
+        other.execute("file.open", &json!({ "path": folder.to_string_lossy() })).expect("open the saved project");
+        assert_eq!(other.board(), s.board());
+        // Opening is undoable like any open: the board from before comes back.
+        assert_eq!(s.execute("edit.undo", &Value::Null).expect("undo")["undone"], "Open");
+        assert!(s.board().net_by_name("KEEP").is_some() && s.folder().is_none());
+
+        // An EAGLE board comes in the same way; a schematic and a broken file fail and change nothing.
+        let write = |name: &str, text: &str| {
+            let path = dir.0.join(name);
+            std::fs::write(&path, text).expect("write");
+            path.to_string_lossy().into_owned()
+        };
+        let board =
+            write("b.brd", "<eagle version=\"9\"><drawing><board><plain><hole x=\"1\" y=\"1\" drill=\"3\"/></plain></board></drawing></eagle>");
+        let opened = s.execute("file.open", &json!({ "path": board })).expect("open");
+        assert_eq!((&opened["imported"], &opened["name"], s.board().holes.len()), (&json!("EAGLE"), &json!("b"), 1));
+        for (name, text) in [
+            ("s.sch", "<eagle version=\"9\"><drawing><schematic/></drawing></eagle>"),
+            ("cut.kicad_pcb", "(kicad_pcb (version 20221018) (net 1 \"GND\""),
+            ("deep.kicad_pcb", "(kicad_pcb ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((("),
+        ] {
+            let path = write(name, text);
+            assert!(matches!(s.execute("file.open", &json!({ "path": path })), Err(EngineError::Failed(_))), "{name}");
+            assert_eq!((s.board().holes.len(), s.doc().undo_label()), (1, Some("Open")));
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository checks and local packaging: cargo xtask ci | layers | assets | wasm | test | bundle"
+description = "Repository checks and local packaging: cargo xtask ci | layers | assets | wasm | test | bundle | corpus"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,4 +12,9 @@ publish = false
 workspace = true
 
 [dependencies]
+circuitcraft-io = { workspace = true }
+circuitcraft-model = { workspace = true }
+circuitcraft-units = { workspace = true }
+circuitcraft-geom = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }

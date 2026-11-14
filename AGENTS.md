@@ -70,8 +70,9 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
   Icons are drawn in code. Font files do not live in this repository.
 - **EAGLE**: the reader is written by hand from `eagle.dtd` and real files. Never commit the DTD
   (CC BY-ND 3.0) or code generated from it.
-- **Test designs** are never committed. The corpus manifest pins upstream designs by commit and
-  checksum; a planned `cargo xtask corpus` command (not written yet) will fetch them for tests.
+- **Test designs** are never committed. `corpus/manifest.json` pins upstream designs by commit and
+  checksum; `cargo xtask corpus` fetches them into `target/corpus/`, imports each and compares it
+  with the counts the manifest records. Tests in the repository use our own synthetic files.
 
 ## Architecture rules
 
@@ -114,6 +115,7 @@ cargo run -p circuitcraft-cli -- exec board.info                # run one comman
 cargo run -p circuitcraft-cli -- info path/to/board.kicad_pcb   # what kind of file is this?
 cargo run -p circuitcraft-cli -- mcp                            # MCP server on stdio
 cargo xtask bundle                                              # macOS: dist/CircuitCraft.app, for this machine
+cargo xtask corpus                                              # fetch and import the public test boards (needs curl)
 cd apps/circuitcraft-web && trunk serve                         # browser build (needs trunk)
 ```
 

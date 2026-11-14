@@ -1,11 +1,29 @@
-//! File formats: CircuitCraft's own project and board files ([`native`]), detection, EAGLE and
-//! KiCad board import in 0.1, fabrication outputs in 0.5.
+//! File formats: CircuitCraft's own project and board files ([`native`]), detection, read-only
+//! import of KiCad ([`kicad`]) and EAGLE ([`eagle`]) boards, fabrication outputs in 0.5.
 //!
 //! Every reader treats its input as hostile: no panics, bounded allocations, bounded recursion.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod eagle;
+#[cfg(test)]
+mod fuzz;
+pub mod import;
+pub mod kicad;
 pub mod native;
+mod sexp;
 pub mod storage;
+mod xml;
+
+/// Reads a board another program wrote, telling which by its content. `name` becomes the
+/// board's name. The result is a new board to work on and save as a CircuitCraft project; the
+/// file it came from is never written.
+pub fn import_board(text: &str, name: &str) -> Result<import::Imported, import::ImportError> {
+    match detect(text.as_bytes()) {
+        Some(Format::KicadPcb) => kicad::read_board(text, name),
+        Some(Format::Eagle) => eagle::read_board(text, name),
+        _ => Err(import::ImportError::WrongFormat("a KiCad or EAGLE board")),
+    }
+}
 
 /// How many bytes [`detect`] looks at.
 pub const SNIFF_LEN: usize = 4096;
