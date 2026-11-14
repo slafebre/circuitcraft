@@ -659,6 +659,7 @@ dependencies = [
 name = "circuitcraft-engine"
 version = "0.0.1"
 dependencies = [
+ "circuitcraft-geom",
  "circuitcraft-io",
  "circuitcraft-model",
  "circuitcraft-render",

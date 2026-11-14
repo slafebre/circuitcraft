@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 circuitcraft-model = { workspace = true }
+circuitcraft-geom = { workspace = true }
 circuitcraft-units = { workspace = true }
 circuitcraft-io = { workspace = true }
 circuitcraft-render = { workspace = true }
