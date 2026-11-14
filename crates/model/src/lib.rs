@@ -22,7 +22,7 @@ pub use document::{Document, UNDO_LIMIT};
 pub use items::{
     Assembly, BoardHole, DesignSettings, Footprint, FootprintText, Graphic, GraphicShape, Hole, ItemId, Justify, Keepout, LibraryLink,
     MAX_FOOTPRINT_GRAPHICS, MAX_FOOTPRINT_TEXTS, MAX_PADS, MAX_ZONE_HOLES, MAX_ZONE_POLYGONS, Mounting, Net, NetId, Opening, Pad, PadConnection,
-    PadFace, PadShape, Rotation, Side, Slot, Text, TextContent, Track, TrackPath, Via, Zone, ZoneFill,
+    PadFace, PadShape, Rotation, Side, Slot, Text, TextContent, Track, TrackPath, Via, Zone, ZoneFill, text_point,
 };
 pub use layer::{Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, ids as layer_ids};
 pub use outline::{Assembled, MAX_OUTLINE_GAP};

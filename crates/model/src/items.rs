@@ -253,6 +253,28 @@ impl Hole {
     pub fn round(diameter: Nm, plated: bool) -> Hole {
         Hole { diameter, slot: None, plated }
     }
+
+    /// The ends of the line the hole is drilled along, relative to its centre, for a hole turned
+    /// by `turn` (its pad's rotation, or none for a hole on its own): a slot's ends, turned by
+    /// `turn` and the slot's own rotation, or the centre twice for a round hole. A drill of the
+    /// hole's diameter along that line cuts the hole. `None` when an end would leave the range of
+    /// a coordinate.
+    pub fn ends(&self, turn: Rotation) -> Option<(Point, Point)> {
+        let Some(slot) = self.slot else { return Some((Point::ORIGIN, Point::ORIGIN)) };
+        let reach = slot.length.0.saturating_sub(self.diameter.0).max(0) / 2;
+        let turn = Rotation::from_millidegrees(i64::from(turn.0) + i64::from(slot.rotation.0));
+        let end = |x: i64| turn.turn(Point::new(Nm(x), Nm(0)));
+        Some((end(-reach)?, end(reach)?))
+    }
+}
+
+/// Where a point of a text's lettering, laid out around its anchor at the origin, lies on what
+/// the text is placed on (the board, or a footprint before [`Footprint::to_board`]): mirrored left
+/// to right about the anchor if the text is mirrored, turned by its rotation and moved to its
+/// anchor. `None` when it would leave the range of a coordinate.
+pub fn text_point(p: Point, mirrored: bool, rotation: Rotation, anchor: Point) -> Option<Point> {
+    let p = if mirrored { Point::new(Nm(p.x.0.checked_neg()?), p.y) } else { p };
+    rotation.turn(p)?.shifted(anchor)
 }
 
 /// What a pad has on one outer side of the board.
@@ -558,8 +580,20 @@ impl Footprint {
     /// rotation and moved to its position. `None` when the point would leave the range of a
     /// coordinate.
     pub fn to_board(&self, p: Point) -> Option<Point> {
-        let p = self.rotation.turn(self.mirrored(p)?)?;
-        Some(Point::new(Nm(p.x.0.checked_add(self.position.x.0)?), Nm(p.y.0.checked_add(self.position.y.0)?)))
+        self.rotation.turn(self.mirrored(p)?)?.shifted(self.position)
+    }
+
+    /// Where a point given relative to `pad`'s position is on the board, without the pad's own
+    /// rotation. Holes are placed this way; [`Hole::ends`] turns a slot.
+    pub fn pad_to_board(&self, pad: &Pad, p: Point) -> Option<Point> {
+        self.to_board(p.shifted(pad.position)?)
+    }
+
+    /// Where a point of `pad`'s copper, given relative to the copper's centre, is on the board:
+    /// moved by the pad's copper offset, turned with the pad, then placed as
+    /// [`Footprint::pad_to_board`] places it.
+    pub fn pad_copper_to_board(&self, pad: &Pad, p: Point) -> Option<Point> {
+        self.pad_to_board(pad, pad.rotation.turn(p.shifted(pad.copper_offset)?)?)
     }
 
     /// The point of the footprint that is at `p` on the board: the reverse of
@@ -994,6 +1028,54 @@ mod tests {
         // rounding of numbers this large.
         let turned = Rotation(45_000).turn(p(4_000_000_000_000_000_000, 0));
         assert!(turned.is_some_and(|q| (q.x.0 - q.y.0).abs() < 4_096 && (q.x.0 - 2_828_427_124_746_190_097).abs() < 4_096), "{turned:?}");
+    }
+
+    #[test]
+    fn a_pad_its_hole_and_a_text_are_placed_on_the_board() {
+        let p = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+        let mut f = Footprint {
+            id: ItemId::from_u128(1),
+            reference: "J1".to_owned(),
+            value: String::new(),
+            link: None,
+            assembly: Assembly { mounting: Mounting::ThroughHole, in_bom: true, in_placement: true, fitted: true },
+            position: p(1_000, 2_000),
+            rotation: Rotation(90_000),
+            side: Side::Bottom,
+            pads: Vec::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+        };
+        let slot = Hole { diameter: Nm(100), slot: Some(Slot { length: Nm(300), rotation: Rotation(0) }), plated: true };
+        let mut pad = Pad::through_hole("1", p(100, 0), PadShape::Circle { diameter: Nm(400) }, slot);
+        pad.rotation = Rotation(90_000);
+        pad.copper_offset = p(50, 0);
+        // The pad's place: mirrored to (-100, 0), turned a quarter to (0, -100), moved.
+        assert_eq!(f.pad_to_board(&pad, Point::ORIGIN), Some(p(1_000, 1_900)));
+        // Its copper centre: the offset (50, 0) turned with the pad to (0, 50), then placed as the
+        // pad is: (100, 50), mirrored (-100, 50), turned (-50, -100), moved.
+        assert_eq!(f.pad_copper_to_board(&pad, Point::ORIGIN), Some(p(950, 1_900)));
+        // The slot runs 100 either way from the centre, along the pad turned a quarter.
+        assert_eq!(slot.ends(pad.rotation), Some((p(0, -100), p(0, 100))));
+        assert_eq!(slot.ends(Rotation(0)), Some((p(-100, 0), p(100, 0))));
+        // A slot's own rotation adds to the pad's, past a whole turn too.
+        let turned = Hole { slot: Some(Slot { length: Nm(300), rotation: Rotation(90_000) }), ..slot };
+        assert_eq!(turned.ends(Rotation(0)), Some((p(0, -100), p(0, 100))));
+        assert_eq!(turned.ends(Rotation(270_000)), Some((p(-100, 0), p(100, 0))));
+        assert_eq!(Hole::round(Nm(100), false).ends(Rotation(45_000)), Some((Point::ORIGIN, Point::ORIGIN)));
+        // A slot no longer than its drill is a round hole.
+        let short = Hole { slot: Some(Slot { length: Nm(50), rotation: Rotation(0) }), ..slot };
+        assert_eq!(short.ends(Rotation(0)), Some((Point::ORIGIN, Point::ORIGIN)));
+        // A text's lettering: mirrored about its anchor, turned, moved.
+        assert_eq!(text_point(p(10, 1), true, Rotation(90_000), p(5, 5)), Some(p(4, -5)));
+        assert_eq!(text_point(p(10, 1), false, Rotation(0), p(5, 5)), Some(p(15, 6)));
+        // Out of range is refused, not wrapped.
+        assert_eq!(text_point(p(i64::MIN, 0), true, Rotation(0), Point::ORIGIN), None);
+        assert_eq!(text_point(p(1, 0), false, Rotation(0), p(i64::MAX, 0)), None);
+        let far = Pad { copper_offset: p(i64::MAX, 0), ..pad.clone() };
+        assert_eq!(f.pad_copper_to_board(&far, p(1, 0)), None);
+        (f.position, f.rotation, f.side) = (p(i64::MAX, 0), Rotation(0), Side::Top);
+        assert_eq!(f.pad_to_board(&pad, Point::ORIGIN), None);
     }
 
     #[test]
