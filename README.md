@@ -112,9 +112,9 @@ Decisions that shape everything else:
 
 ## Drive it from agents, MCP and the CLI
 
-`circuitcraft-cli commands`, `exec`, `info` and `mcp` (with the `list_commands` and `execute`
-tools) work today, and so do the `file.open` and `file.save` commands for project folders. The
-rest below is the 0.1 design sketch.
+`circuitcraft-cli commands`, `exec`, `info`, `render` and `mcp` (with the `list_commands` and
+`execute` tools) work today, and so does `mcp --connect`, which drives the board open in the app.
+The rest below is the 0.1 design sketch.
 
 ```sh
 circuitcraft-cli info board.ccpcb                     # layers, nets, components, extents
@@ -124,6 +124,17 @@ circuitcraft-cli fab board.ccpcb --out fab/           # Gerber X2, drill, BOM, p
 circuitcraft-cli mcp                                  # MCP server on stdio, headless
 circuitcraft-cli mcp --connect 127.0.0.1:7979         # bridged to the running app
 ```
+
+The app listens for agents only when it is started with `circuitcraft --control` (or
+`cargo run -p circuitcraft -- --control`), on 127.0.0.1:7979 unless another loopback address
+follows, and its status bar says so while it does. A caller's first line must be
+`{"jsonrpc":"2.0","id":1,"method":"control/authenticate","params":{"token":"…"}}`, with the token
+the app writes to `control.json` in your CircuitCraft folder (`~/Library/Application
+Support/CircuitCraft` on macOS, `%LOCALAPPDATA%\CircuitCraft` on Windows,
+`$XDG_STATE_HOME/circuitcraft` or `~/.local/state/circuitcraft` elsewhere), which only you can
+read. The app's reply carries the file's `answer`: compare it before you trust what answers, so
+that a program that took the port after the app ended can't pose as it. After that the channel
+speaks the same JSON-RPC lines as `circuitcraft-cli mcp`. `mcp --connect` does all this for you.
 
 MCP tools will include running any command with JSON, typing a shortcut sequence, inspecting and
 querying the design, running checks, and rendering a view or a single layer to PNG.

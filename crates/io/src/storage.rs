@@ -108,20 +108,13 @@ impl Default for DiskStorage {
 }
 
 impl DiskStorage {
-    /// The disk, with unsaved work kept in the user's own state folder for CircuitCraft:
-    /// `~/Library/Application Support/CircuitCraft/Recovery` on macOS,
+    /// The disk, with unsaved work kept in the user's own state folder for CircuitCraft
+    /// ([`user_folder`]): `~/Library/Application Support/CircuitCraft/Recovery` on macOS,
     /// `%LOCALAPPDATA%\CircuitCraft\Recovery` on Windows, and
     /// `$XDG_STATE_HOME/circuitcraft/recovery` (or `~/.local/state/…`) elsewhere.
     pub fn new() -> DiskStorage {
-        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute());
-        let recovery = if cfg!(target_os = "macos") {
-            var("HOME").map(|home| home.join("Library/Application Support/CircuitCraft/Recovery"))
-        } else if cfg!(windows) {
-            var("LOCALAPPDATA").map(|data| data.join("CircuitCraft").join("Recovery"))
-        } else {
-            var("XDG_STATE_HOME").or_else(|| var("HOME").map(|home| home.join(".local/state"))).map(|state| state.join("circuitcraft/recovery"))
-        };
-        DiskStorage { recovery }
+        let name = if cfg!(any(target_os = "macos", windows)) { "Recovery" } else { "recovery" };
+        DiskStorage { recovery: user_folder().map(|folder| folder.join(name)) }
     }
 
     /// The disk, with unsaved work kept in `recovery` (or nowhere).
@@ -154,43 +147,9 @@ impl Storage for DiskStorage {
         Ok(bytes)
     }
 
-    /// Writes by way of a temporary file in the same folder, which then replaces the file:
-    ///
-    /// - A crash, a full disk or a failed write leaves the old file untouched, and the temporary
-    ///   file is removed on every error path.
-    /// - The temporary file is created new (`create_new` refuses any existing path, symlinks
-    ///   included) with a random name, so a link planted in the folder can't redirect the write,
-    ///   and two saves at once don't share a file.
-    /// - The data is flushed to disk before the rename (on macOS `sync_all` is a full flush). On
-    ///   Unix the folder is flushed after it too, so a power cut leaves the old file or the new
-    ///   one; other systems don't offer that flush, so the rename itself may be lost there.
-    /// - The file is replaced, not rewritten: a file that is a symlink becomes a regular file,
-    ///   and the new file gets default permissions.
+    /// See [`write_file`].
     fn write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        // A folder is never replaced by a file, and neither is a link that leads to one.
-        // Renaming onto a folder is refused on Unix; asking first gives the same answer where it
-        // might not be.
-        if matches!(self.kind(path), Ok(Kind::Folder)) {
-            return Err(Error::new(ErrorKind::IsADirectory, "a folder is in the way"));
-        }
-        // 128 random bits from the system (an item id is just that): a name nothing else has, and
-        // one that doesn't depend on the target's name, so a long file name still fits.
-        let tag = circuitcraft_model::ItemId::random().map_err(|e| Error::other(e.to_string()))?.as_u128();
-        let temp = path.with_file_name(format!(".circuitcraft-{tag:032x}.saving"));
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-        let written = file.write_all(bytes).and_then(|()| file.sync_all());
-        drop(file);
-        if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(e);
-        }
-        // Flushes the folder's entries after the rename, on Unix (other systems can't). A failure
-        // here doesn't undo a save that has already happened, so it is ignored.
-        #[cfg(unix)]
-        if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
-            let _ = std::fs::File::open(folder).and_then(|f| f.sync_all());
-        }
-        Ok(())
+        write_file(path, bytes, false)
     }
 
     fn remove(&self, path: &Path) -> Result<()> {
@@ -245,6 +204,79 @@ impl Storage for DiskStorage {
     fn recovery_folder(&self) -> Option<PathBuf> {
         self.recovery.clone()
     }
+}
+
+/// CircuitCraft's own folder among the user's state: `~/Library/Application Support/CircuitCraft`
+/// on macOS, `%LOCALAPPDATA%\CircuitCraft` on Windows, and `$XDG_STATE_HOME/circuitcraft` (or
+/// `~/.local/state/circuitcraft`) elsewhere. `None` when the environment doesn't say where the
+/// user's folders are, or names a relative path, which would depend on where the app started.
+pub fn user_folder() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from).filter(|p| p.is_absolute());
+    if cfg!(target_os = "macos") {
+        var("HOME").map(|home| home.join("Library/Application Support/CircuitCraft"))
+    } else if cfg!(windows) {
+        var("LOCALAPPDATA").map(|data| data.join("CircuitCraft"))
+    } else {
+        var("XDG_STATE_HOME").or_else(|| var("HOME").map(|home| home.join(".local/state"))).map(|state| state.join("circuitcraft"))
+    }
+}
+
+/// Writes a file on the disk that only the user can read, the way [`DiskStorage`] writes every
+/// file (by way of a temporary file that replaces it). On Unix the file is created with mode
+/// 0600. On Windows it takes the permissions of its folder, so it belongs in [`user_folder`],
+/// which only the user can read by default.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_file(path, bytes, true)
+}
+
+/// Writes `bytes` to `path` by way of a temporary file in the same folder, which then replaces
+/// the file:
+///
+/// - A crash, a full disk or a failed write leaves the old file untouched, and the temporary
+///   file is removed on every error path.
+/// - The temporary file is created new (`create_new` refuses any existing path, symlinks
+///   included) with a random name, so a link planted in the folder can't redirect the write,
+///   and two saves at once don't share a file.
+/// - The data is flushed to disk before the rename (on macOS `sync_all` is a full flush). On
+///   Unix the folder is flushed after it too, so a power cut leaves the old file or the new
+///   one; other systems don't offer that flush, so the rename itself may be lost there.
+/// - The file is replaced, not rewritten: a file that is a symlink becomes a regular file,
+///   and the new file gets default permissions, or on Unix mode 0600 when `private`.
+fn write_file(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    // A folder is never replaced by a file, and neither is a link that leads to one.
+    // Renaming onto a folder is refused on Unix; asking first gives the same answer where it
+    // might not be.
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Err(Error::new(ErrorKind::IsADirectory, "a folder is in the way"));
+    }
+    // 128 random bits from the system (an item id is just that): a name nothing else has, and
+    // one that doesn't depend on the target's name, so a long file name still fits.
+    let tag = circuitcraft_model::ItemId::random().map_err(|e| Error::other(e.to_string()))?.as_u128();
+    let temp = path.with_file_name(format!(".circuitcraft-{tag:032x}.saving"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // A private file is readable by the user alone from the start, so there is no moment
+    // another user could open it.
+    #[cfg(unix)]
+    if private {
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let mut file = options.open(&temp)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    // Flushes the folder's entries after the rename, on Unix (other systems can't). A failure
+    // here doesn't undo a save that has already happened, so it is ignored.
+    #[cfg(unix)]
+    if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
+        let _ = std::fs::File::open(folder).and_then(|f| f.sync_all());
+    }
+    Ok(())
 }
 
 /// Files held in memory, for the browser and for tests. Paths are absolute from `/`; a relative
@@ -556,5 +588,19 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).expect("victim"), "precious");
         assert!(std::fs::symlink_metadata(&target).expect("target").file_type().is_file());
         assert!(!dir.0.join("nowhere").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_file_is_for_the_user_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = TempDir::new("storage-private");
+        let file = dir.0.join("control.json");
+        // Also when it replaces a file anyone could read.
+        std::fs::write(&file, "old").expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        write_private(&file, b"secret").expect("write");
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), "secret");
+        assert_eq!(std::fs::metadata(&file).expect("meta").permissions().mode() & 0o777, 0o600);
     }
 }

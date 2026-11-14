@@ -111,11 +111,13 @@ layers, wasm). Commit after each piece of work that builds.
 ```sh
 cargo run -p circuitcraft                                       # desktop app
 cargo run -p circuitcraft -- board.kicad_pcb                    # desktop app, opening a board
+cargo run -p circuitcraft -- --control                          # desktop app that agents can drive
 cargo run -p circuitcraft-cli -- commands                       # every command, as JSON
 cargo run -p circuitcraft-cli -- exec board.info                # run one command
 cargo run -p circuitcraft-cli -- info path/to/board.kicad_pcb   # what kind of file is this?
 cargo run -p circuitcraft-cli -- render board.kicad_pcb out.png # draw a board, no window needed
 cargo run -p circuitcraft-cli -- mcp                            # MCP server on stdio
+cargo run -p circuitcraft-cli -- mcp --connect                  # MCP bridged to that app
 cargo xtask bundle                                              # macOS: dist/CircuitCraft.app, for this machine
 cargo xtask corpus                                              # fetch and import the public test boards (needs curl)
 cd apps/circuitcraft-web && trunk serve                         # browser build (needs trunk)

@@ -640,6 +640,7 @@ name = "circuitcraft"
 version = "0.0.1"
 dependencies = [
  "circuitcraft-engine",
+ "circuitcraft-mcp",
  "circuitcraft-ui-egui",
  "eframe",
  "serde_json",
@@ -702,6 +703,8 @@ name = "circuitcraft-mcp"
 version = "0.0.1"
 dependencies = [
  "circuitcraft-engine",
+ "circuitcraft-io",
+ "getrandom 0.4.3",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -738,6 +741,7 @@ dependencies = [
  "circuitcraft-engine",
  "circuitcraft-geom",
  "circuitcraft-io",
+ "circuitcraft-mcp",
  "circuitcraft-model",
  "circuitcraft-render",
  "circuitcraft-units",

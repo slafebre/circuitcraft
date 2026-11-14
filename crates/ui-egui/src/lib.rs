@@ -9,6 +9,7 @@ mod files;
 
 use board_view::BoardView;
 use circuitcraft_engine::{COMMANDS, CommandSpec, Session};
+use circuitcraft_mcp::control::{MAX_QUEUED, Server};
 use circuitcraft_render::layer_color;
 use circuitcraft_units::Point;
 use egui::{Color32, RichText, vec2};
@@ -25,6 +26,8 @@ mod theme {
         Color32::from_rgb(r, g, b)
     };
     pub const TEXT_DIM: Color32 = Color32::from_rgb(140, 146, 156);
+    /// The control channel's indicator: it should catch the eye.
+    pub const AGENTS: Color32 = Color32::from_rgb(240, 180, 60);
 }
 
 /// How often unsaved work is written to the recovery folder, in seconds. A crash (and in the
@@ -61,6 +64,8 @@ pub struct CircuitApp {
     /// answer at once, so there it stays empty.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     inbox: files::Inbox,
+    /// The control channel, while agents may drive this window.
+    control: Option<Server>,
 }
 
 impl CircuitApp {
@@ -77,6 +82,7 @@ impl CircuitApp {
             view: BoardView::default(),
             pointer: None,
             inbox: files::Inbox::default(),
+            control: None,
         };
         app.list_unsaved();
         if app.unsaved.is_some() {
@@ -111,6 +117,56 @@ impl CircuitApp {
         }
     }
 
+    /// Lets agents drive this window through `server`, until the app closes. The status bar shows
+    /// it for as long as it listens.
+    pub fn listen(&mut self, server: Server) {
+        self.control = Some(server);
+    }
+
+    /// Stops letting agents drive this window: the control channel closes and its control file is
+    /// removed.
+    pub fn stop_listening(&mut self) {
+        self.control = None;
+    }
+
+    /// Says something in the status bar, for the host: why the control channel isn't on, say.
+    pub fn report(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
+
+    /// Answers what agents have sent over the control channel, on this thread, which owns the
+    /// session. Their commands go through [`Session::execute`] like every other, so they are
+    /// undoable and the board view shows what they changed; they never open a window. The host
+    /// calls this whenever the server wakes it, also while the window is hidden and draws nothing
+    /// (eframe's `App::logic`), so an agent never waits for the window to be shown.
+    pub fn serve_agents(&mut self) {
+        // Held aside while its requests run, which may change anything else in the app.
+        let Some(server) = self.control.take() else { return };
+        // At most a queue's worth at a time, so the window stays responsive; the server woke the
+        // app for every request, so the rest are answered next time.
+        for _ in 0..MAX_QUEUED {
+            let Some(request) = server.next() else { break };
+            let reply = circuitcraft_mcp::handle_line(&mut self.session, request.line());
+            if let Some((id, status)) = agent_status(request.line(), reply.as_ref()) {
+                self.status = status;
+                self.after_command(id);
+            }
+            request.answer(reply);
+        }
+        self.control = Some(server);
+    }
+
+    /// Keeps what the app shows besides the board up to date after command `id`, whoever ran it.
+    /// Unsaved work is offered in a window with buttons, which is listed again after any recovery
+    /// command: also when the command failed, which may be because another session took what was
+    /// listed.
+    fn after_command(&mut self, id: &str) {
+        if id.starts_with("recovery.") {
+            self.list_unsaved();
+            self.discarding = None;
+        }
+    }
+
     /// The session, for hosts that drive the app (control channel, tests).
     pub fn session(&self) -> &Session {
         &self.session
@@ -120,13 +176,8 @@ impl CircuitApp {
     /// Returns whether it succeeded.
     pub fn run(&mut self, id: &str, params: &Value) -> bool {
         let outcome = self.session.execute(id, params);
-        // Unsaved work is offered in a window with buttons, which is kept up to date: also when
-        // the command failed, which may be because another session took what was listed.
+        self.after_command(id);
         let recovery = id.starts_with("recovery.");
-        if recovery {
-            self.list_unsaved();
-            self.discarding = None;
-        }
         match outcome {
             Ok(v) => {
                 let spec = circuitcraft_engine::command(id);
@@ -264,6 +315,24 @@ impl CircuitApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(p) = self.pointer {
                         ui.label(RichText::new(format!("x {:.3}  y {:.3} mm", p.x.to_mm(), p.y.to_mm())).color(theme::TEXT_DIM).monospace());
+                    }
+                    // Whoever can drive this window should never be a secret.
+                    if let Some(server) = &self.control {
+                        if self.pointer.is_some() {
+                            ui.separator();
+                        }
+                        let agents = match server.agents() {
+                            0 => String::new(),
+                            1 => " · 1 connected".to_owned(),
+                            n => format!(" · {n} connected"),
+                        };
+                        let label = ui.label(RichText::new(format!("Agents on {}{agents}", server.address())).color(theme::AGENTS));
+                        // A dot drawn, not a character: the default fonts have no round bullet.
+                        let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 4.0, theme::AGENTS);
+                        label.on_hover_text(
+                            "Programs you run can drive this window over the control channel: they need the token in CircuitCraft's control file, which only you can read. Start the app without --control to turn it off.",
+                        );
                     }
                 });
             });
@@ -407,6 +476,27 @@ impl CircuitApp {
             self.result = None;
         }
     }
+}
+
+/// What the status bar says about a message from an agent: for a command, its id and label and
+/// how it went; nothing for the rest (the handshake, the command list).
+fn agent_status(line: &str, reply: Option<&Value>) -> Option<(&'static str, String)> {
+    let msg: Value = serde_json::from_str(line).ok()?;
+    let args =
+        msg.pointer("/params/arguments").filter(|_| msg["method"] == "tools/call" && msg.pointer("/params/name") == Some(&Value::from("execute")))?;
+    let id = args.get("command")?.as_str()?;
+    let spec = circuitcraft_engine::command(id)?;
+    let result = reply?.get("result")?;
+    let label = spec.label;
+    Some((
+        spec.id,
+        if result["isError"] == true {
+            let why = result.pointer("/content/0/text").and_then(Value::as_str).unwrap_or("failed");
+            format!("Agent: {label}: {why}")
+        } else {
+            format!("Agent: {label}: done")
+        },
+    ))
 }
 
 /// Top-level menus in order of first appearance, with Help last.
@@ -674,5 +764,81 @@ mod tests {
         assert_eq!(app.session().board().name, "Blinky");
         app.run("nope", &Value::Null);
         assert!(app.status.contains("unknown command"));
+    }
+
+    /// Plays an agent: sends each of `calls` to `app` over the control channel (after the
+    /// authentication) and returns the replies, while this thread plays the UI thread.
+    fn agent(app: &mut CircuitApp, calls: Vec<Value>) -> Vec<Value> {
+        use std::io::{BufRead as _, Write as _};
+        let server = Server::start(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), None, std::sync::Arc::new(|| {})).expect("start");
+        let (address, token) = (server.address(), server.secrets().token.clone());
+        app.listen(server);
+        let client = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(address).expect("connect");
+            let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone"));
+            let hello = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": "control/authenticate", "params": { "token": token } });
+            let mut replies = Vec::new();
+            for (id, line) in std::iter::once(hello).chain(calls).enumerate() {
+                writeln!(stream, "{line}").expect("write");
+                let mut reply = String::new();
+                reader.read_line(&mut reply).expect("read");
+                if id > 0 {
+                    replies.push(serde_json::from_str::<Value>(&reply).expect("json"));
+                }
+            }
+            replies
+        });
+        while !client.is_finished() {
+            app.serve_agents();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        client.join().expect("client")
+    }
+
+    fn execute(command: &str, params: Value) -> Value {
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "execute", "arguments": { "command": command, "params": params } } })
+    }
+
+    #[test]
+    fn agents_drive_the_open_board_on_the_ui_thread() {
+        let mut app = CircuitApp::new(Session::in_memory());
+        let replies = agent(
+            &mut app,
+            vec![
+                execute("track.add", serde_json::json!({ "layer": "Top Copper", "from": [0, 0], "to": [3, 4] })),
+                execute("board.info", Value::Null),
+            ],
+        );
+        assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+        assert_eq!(app.session().board().tracks.len(), 1, "the track is on the board the window shows");
+        assert!(app.result.is_none(), "a report asked for by an agent opens no window");
+        assert_eq!(app.status, "Agent: Board Information: done");
+        app.run("edit.undo", &Value::Null);
+        assert_eq!(app.session().board().tracks.len(), 0, "and the person can undo it");
+    }
+
+    #[test]
+    fn the_unsaved_work_window_follows_what_an_agent_recovers() {
+        let files = std::sync::Arc::new(circuitcraft_io::storage::MemoryStorage::with_recovery());
+        let mut ended = Session::with_storage(Box::new(files.clone()));
+        ended.execute("net.add", &serde_json::json!({ "name": "GND" })).expect("net");
+        ended.execute("file.autosave", &Value::Null).expect("autosave");
+        let mut app = CircuitApp::new(Session::with_storage(Box::new(files.clone())));
+        let offered = app.unsaved.clone().expect("the window is open");
+        app.press_discard(Some(offered[0].id.clone()));
+        let replies = agent(&mut app, vec![execute("recovery.discard", serde_json::json!({ "id": offered[0].id }))]);
+        assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+        assert!(app.unsaved.is_none() && app.discarding.is_none(), "nothing left to offer, and no Discard half pressed");
+    }
+
+    #[test]
+    fn the_status_bar_names_what_an_agent_ran() {
+        let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"command":"via.add"}}}"#;
+        let failed = serde_json::json!({ "result": { "isError": true, "content": [{ "type": "text", "text": "bad parameters" }] } });
+        assert_eq!(agent_status(call, Some(&failed)), Some(("via.add", "Agent: Add Via: bad parameters".to_owned())));
+        assert_eq!(agent_status(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, None), None);
+        assert_eq!(agent_status("not json", None), None);
+        let unknown = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"execute","arguments":{"command":"nope"}}}"#;
+        assert_eq!(agent_status(unknown, Some(&failed)), None);
     }
 }
