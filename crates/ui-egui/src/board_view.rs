@@ -100,30 +100,25 @@ impl BoardView {
     /// a mouse wheel zooms about the pointer, and so do pinching and scrolling with Ctrl or Cmd
     /// held; two fingers on a trackpad pan; a double click shows the whole board. Where the
     /// system doesn't say whether a wheel or a trackpad scrolled, scrolling zooms.
-    pub(crate) fn gesture(response: &egui::Response, input: &egui::InputState, camera: Camera) -> Gesture {
+    ///
+    /// Must not be called inside `ctx.input(…)`: `double_clicked` and `drag_delta` lock the
+    /// context's input themselves, and egui's lock is not re-entrant, so a click there hangs the
+    /// app. The input is read here in one short lock that calls nothing else.
+    pub(crate) fn gesture(response: &egui::Response, camera: Camera) -> Gesture {
         if response.double_clicked() {
             return Gesture::Fit;
         }
         let mut moved = camera;
         let screen = Screen { rect: response.rect, camera };
         if response.dragged() {
-            let delta = response.drag_delta();
-            moved = pan(moved, delta);
+            moved = pan(moved, response.drag_delta());
         }
         if response.hovered() {
-            let at = input.pointer.hover_pos().map_or(camera.center, |p| screen.board(p));
-            let mut factor = f64::from(input.zoom_delta());
-            for event in &input.raw.events {
-                let egui::Event::MouseWheel { unit, delta, source, modifiers, .. } = event else { continue };
-                // With Ctrl or Cmd held, egui already counts the scroll as zoom.
-                if modifiers.ctrl || modifiers.command {
-                    continue;
-                }
-                let points = match unit {
-                    egui::MouseWheelUnit::Point => *delta,
-                    egui::MouseWheelUnit::Line => *delta * LINE_POINTS,
-                    egui::MouseWheelUnit::Page => *delta * response.rect.height(),
-                };
+            let page = response.rect.height();
+            let (pointer, zoom_delta, wheel) = response.ctx.input(|input| (input.pointer.hover_pos(), input.zoom_delta(), scrolls(input, page)));
+            let at = pointer.map_or(camera.center, |p| screen.board(p));
+            let mut factor = f64::from(zoom_delta);
+            for (points, source) in wheel {
                 match source {
                     egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum => moved = pan(moved, points),
                     egui::MouseWheelSource::Wheel | egui::MouseWheelSource::Unknown => factor *= ZOOM_PER_POINT.powf(f64::from(points.y)),
@@ -140,6 +135,25 @@ impl BoardView {
     pub(crate) fn board_point(rect: egui::Rect, camera: Camera, pos: Pos2) -> Point {
         Screen { rect, camera }.board(pos)
     }
+}
+
+/// This frame's scrolling, in points, and what drove each: a page of scrolling is `page` points.
+/// With Ctrl or Cmd held, egui already counts the scroll as zoom, so it is left out.
+fn scrolls(input: &egui::InputState, page: f32) -> Vec<(Vec2, egui::MouseWheelSource)> {
+    let mut out = Vec::new();
+    for event in &input.raw.events {
+        let egui::Event::MouseWheel { unit, delta, source, modifiers, .. } = event else { continue };
+        if modifiers.ctrl || modifiers.command {
+            continue;
+        }
+        let points = match unit {
+            egui::MouseWheelUnit::Point => *delta,
+            egui::MouseWheelUnit::Line => *delta * LINE_POINTS,
+            egui::MouseWheelUnit::Page => *delta * page,
+        };
+        out.push((points, *source));
+    }
+    out
 }
 
 /// The session command that puts the view where a gesture leaves it.

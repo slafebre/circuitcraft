@@ -371,7 +371,8 @@ impl CircuitApp {
             let response = ui.interact(rect, ui.scope_id().with("board_view"), egui::Sense::click_and_drag());
             self.view.update(&self.session);
             let camera = self.view.camera(&self.session, rect.size());
-            let gesture = ui.input(|input| BoardView::gesture(&response, input, camera));
+            // Outside `ui.input`: the gesture reads the response, which takes that lock itself.
+            let gesture = BoardView::gesture(&response, camera);
             // Moving the view is quiet: it says something only when it fails.
             if let Some((id, params)) = board_view::command(gesture)
                 && let Err(e) = self.session.execute(id, &params)
@@ -610,6 +611,60 @@ mod tests {
         // Zoom to Fit from the View menu shows the whole board again.
         app.run("view.fit", &Value::Null);
         assert!(app.session().camera().is_none());
+    }
+
+    /// A press or a release of the primary button at `pos`.
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Clicking, double-clicking and dragging on the board used to hang the app: reading the
+    /// click inside egui's input lock took that lock again. Run in a thread with a deadline, so a
+    /// hang fails the test instead of hanging it.
+    #[test]
+    fn clicking_double_clicking_and_dragging_the_board_do_not_hang() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut session = Session::in_memory();
+            session.execute("track.add", &serde_json::json!({ "layer": "Top Copper", "width": 0.5, "from": [0, 0], "to": [10, 0] })).expect("track");
+            let mut app = CircuitApp::new(session);
+            let ctx = egui::Context::default();
+            let at = egui::pos2(600.0, 400.0);
+            frames(&mut app, &ctx, 2, &|_| vec![egui::Event::PointerMoved(at)]);
+            // A click.
+            frames(&mut app, &ctx, 3, &|frame| match frame {
+                0 => vec![button(at, true)],
+                1 => vec![button(at, false)],
+                _ => Vec::new(),
+            });
+            // A drag of 100 points to the right pans the view.
+            let to = egui::pos2(700.0, 400.0);
+            frames(&mut app, &ctx, 12, &|frame| match frame {
+                0 => vec![button(at, true)],
+                1..=10 => vec![egui::Event::PointerMoved(egui::pos2(at.x + 10.0 * frame as f32, at.y))],
+                _ => vec![button(to, false)],
+            });
+            let panned = app.session().camera();
+            // Half a second later, so it is not counted with the first click: a double click
+            // fits the board again.
+            frames(&mut app, &ctx, 30, &|_| Vec::new());
+            frames(&mut app, &ctx, 6, &|frame| match frame {
+                0 | 2 => vec![egui::Event::PointerMoved(to), button(to, true)],
+                1 | 3 => vec![button(to, false)],
+                _ => Vec::new(),
+            });
+            let _ = done.send((panned, app.session().camera()));
+        });
+        let (panned, fitted) = match finished.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the app hung on a click or a drag"),
+            // A debug build's lock gives up on a deadlock after ten seconds and panics.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the app's thread panicked (see above): a click or a drag deadlocked or failed")
+            }
+        };
+        assert!(panned.is_some(), "the drag moved the view");
+        assert!(fitted.is_none(), "the double click fitted it again");
     }
 
     #[test]
