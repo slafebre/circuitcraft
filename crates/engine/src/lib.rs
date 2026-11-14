@@ -5,6 +5,7 @@
 //! through [`Session::execute`]; front ends never change the design any other way.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod base64;
 mod commands;
 
 pub use commands::COMMANDS;
@@ -127,7 +128,27 @@ struct View {
     single_layer: bool,
     /// The net that is highlighted.
     highlight: Option<NetId>,
+    /// Where the view looks and how close; `None` until someone pans or zooms, which shows the
+    /// whole board.
+    camera: Option<Camera>,
 }
+
+/// Where a board view looks, and how close: the point of the board in the middle of the view,
+/// and how many nanometres one pixel spans. A front end that knows its size works out what is
+/// on screen; one that has no camera fits the whole board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Camera {
+    /// The point of the board in the middle of the view.
+    pub center: circuitcraft_units::Point,
+    /// How many nanometres one pixel spans, from [`MIN_NM_PER_PIXEL`] to [`MAX_NM_PER_PIXEL`].
+    pub nm_per_pixel: i64,
+}
+
+/// The closest a view can zoom in: a nanometre a pixel.
+pub const MIN_NM_PER_PIXEL: i64 = 1;
+
+/// The farthest a view can zoom out: ten millimetres a pixel, a 20 m design in two thousand.
+pub const MAX_NM_PER_PIXEL: i64 = 10_000_000;
 
 /// What the session keeps for a board besides the board itself.
 #[derive(Debug, Default)]
@@ -257,6 +278,11 @@ impl Session {
         chosen.or_else(|| stack.copper().next().or(stack.layers.first()).map(|l| l.id))
     }
 
+    /// Whether a layer was hidden: it is not drawn, even outside single-layer mode.
+    pub fn layer_hidden(&self, id: LayerId) -> bool {
+        self.state().is_some_and(|s| s.view.hidden.contains(&id))
+    }
+
     /// Whether only the active layer is drawn.
     pub fn single_layer(&self) -> bool {
         self.state().is_some_and(|s| s.view.single_layer)
@@ -274,6 +300,22 @@ impl Session {
     /// The highlighted net, if there is one and the board still has it.
     pub fn highlight(&self) -> Option<NetId> {
         self.state().and_then(|s| s.view.highlight).filter(|&net| self.board().nets.contains(net))
+    }
+
+    /// Where the view looks and how close, once someone has panned or zoomed; `None` shows the
+    /// whole board.
+    pub fn camera(&self) -> Option<Camera> {
+        self.state().and_then(|s| s.view.camera)
+    }
+
+    /// What a picture or the board view draws: the layers the view shows, the highlighted net,
+    /// and the active layer over the others once someone has chosen it (a board that was just
+    /// opened is drawn in the order it is built, its silkscreen over its copper).
+    pub fn render_options(&self) -> circuitcraft_render::Options {
+        let board = self.board();
+        let visible = board.stack.layers.iter().map(|l| l.id).filter(|&id| self.layer_visible(id)).collect();
+        let active = self.state().and_then(|state| state.view.active).filter(|&id| board.stack.get(id).is_some());
+        circuitcraft_render::Options { visible, active, highlight: self.highlight(), tolerance: circuitcraft_render::TOLERANCE }
     }
 
     /// Replaces the board with a new or opened one, undoably, and starts keeping its files,
@@ -498,6 +540,7 @@ mod tests {
             read_only,
             [
                 "recovery.list",
+                "file.zip",
                 "select.list",
                 "view.render",
                 "project.info",
