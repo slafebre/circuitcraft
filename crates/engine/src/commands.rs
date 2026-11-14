@@ -76,6 +76,19 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Removes a board's unsaved work from the recovery folder. A board that is open here and still unsaved gets a new copy the next time unsaved work is kept. Returns {discarded}.",
         typed!(recovery_discard, RecoveryDiscard),
     ),
+    spec(
+        "file.unpack",
+        "Take In a File",
+        "Puts a file the person handed over (the browser's file picker gives bytes, not a place on disk) into a new folder, which must not exist yet: a .zip is unpacked into it, keeping the folders inside, and any other file is written into it as it is. Nothing that is there is ever replaced. Names in a zip that would lead out of the folder are refused, and then nothing is written. Returns {path}: what to open with file.open, which is the project folder when there is one, or else the one board file.",
+        typed!(file_unpack, FileUnpack),
+    ),
+    spec(
+        "file.zip",
+        "Zip Project",
+        "Zips the open board's project files (.ccproj, .ccsch, .ccpcb in its folder; nothing else there) for the person to keep: the browser's way to hand a project back. The same files give the same bytes. Returns {name, bytes, data}, where name is the folder's name with .zip and data is base64.",
+        typed!(file_zip, NoParams),
+    )
+    .read_only(),
     spec("edit.undo", "Undo", "Undoes the last change. Returns {undone}: its label, or null when there was nothing to undo.", typed!(edit_undo, NoParams))
         .menu("Edit/Undo")
         .shortcut("Ctrl+Z"),
@@ -119,6 +132,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     )
     .menu("View/Single Layer Mode"),
     spec("view.highlight", "Highlight Net", "Highlights a net, or none. Returns the view.", typed!(view_highlight, ViewHighlight)),
+    spec(
+        "view.camera",
+        "Pan and Zoom",
+        "Looks at a point of the board from a distance: the board view puts center in its middle at pixelsPerMm. Returns the view.",
+        typed!(view_camera, ViewCamera),
+    ),
+    spec("view.fit", "Zoom to Fit", "Shows the whole board in the view again. Returns the view.", typed!(view_fit, NoParams)).menu("View/Zoom to Fit").shortcut("Home"),
     spec(
         "view.render",
         "Picture of the Board",
@@ -709,7 +729,38 @@ fn view(s: &Session) -> Value {
         "singleLayer": s.single_layer(),
         "highlight": s.highlight().and_then(|net| s.board().nets.get(net)).map(|n| n.name.as_str()),
         "hiddenLayers": stack.layers.iter().filter(|l| hidden.is_some_and(|h| h.contains(&l.id))).map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        "camera": s.camera().map(|c| json!({ "center": [c.center.x.to_mm(), c.center.y.to_mm()], "pixelsPerMm": 1e6 / c.nm_per_pixel as f64 })),
     })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ViewCamera {
+    /// The point of the board in the middle of the view, [x, y] in millimetres.
+    center: [f64; 2],
+    /// How close the view is: pixels per millimetre, from 0.1 (ten millimetres a pixel) to a
+    /// million (a nanometre a pixel). Rounded to whole nanometres a pixel.
+    #[serde(rename = "pixelsPerMm")]
+    pixels_per_mm: f64,
+}
+
+fn view_camera(s: &mut Session, p: ViewCamera) -> Result<Value, EngineError> {
+    let [x, y] = p.center;
+    let center = Point::from_mm(x, y).map_err(|e| bad(format!("`center`: {e}")))?;
+    let ppm = p.pixels_per_mm;
+    let (fewest, most) = (1e6 / crate::MAX_NM_PER_PIXEL as f64, 1e6 / crate::MIN_NM_PER_PIXEL as f64);
+    if !(fewest..=most).contains(&ppm) {
+        return Err(bad(format!("`pixelsPerMm` must be from {fewest} to {most}")));
+    }
+    // In range, so a whole number from 1 to 10^7.
+    let nm_per_pixel = ((1e6 / ppm).round() as i64).clamp(crate::MIN_NM_PER_PIXEL, crate::MAX_NM_PER_PIXEL);
+    s.state_mut().view.camera = Some(crate::Camera { center, nm_per_pixel });
+    Ok(view(s))
+}
+
+fn view_fit(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
+    s.state_mut().view.camera = None;
+    Ok(view(s))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -819,17 +870,13 @@ struct FileRender {
     layers: Option<Vec<String>>,
 }
 
-/// What a picture of the board shows: the layers given, or what the view shows.
+/// What a picture of the board shows: what the view shows, or the layers given.
 fn render_options(s: &Session, layers: Option<&[String]>) -> Result<circuitcraft_render::Options, EngineError> {
-    let board = s.board();
-    let visible = match layers {
-        Some(names) => names.iter().map(|name| layer(board, name)).collect::<Result<_, _>>()?,
-        None => board.stack.layers.iter().map(|l| l.id).filter(|&id| s.layer_visible(id)).collect(),
-    };
-    // Only a layer someone chose is raised over the others: a board that was just opened is drawn
-    // in the order it is built, its silkscreen over its copper.
-    let active = s.state().and_then(|state| state.view.active).filter(|&id| board.stack.get(id).is_some());
-    Ok(circuitcraft_render::Options { visible, active, highlight: s.highlight(), tolerance: circuitcraft_render::TOLERANCE })
+    let mut options = s.render_options();
+    if let Some(names) = layers {
+        options.visible = names.iter().map(|name| layer(s.board(), name)).collect::<Result<_, _>>()?;
+    }
+    Ok(options)
 }
 
 /// A picture of the board, and what it shows.
@@ -861,7 +908,7 @@ fn view_render(s: &mut Session, p: Render) -> Result<Value, EngineError> {
     let (bytes, mut about) = picture(s, format, p.size, p.layers.as_deref())?;
     about[format.name()] = match format {
         PictureFormat::Svg => json!(String::from_utf8_lossy(&bytes)),
-        PictureFormat::Png => json!(base64(&bytes)),
+        PictureFormat::Png => json!(crate::base64::encode(&bytes)),
     };
     Ok(about)
 }
@@ -879,19 +926,78 @@ fn file_render(s: &mut Session, p: FileRender) -> Result<Value, EngineError> {
     Ok(json!({ "path": p.path, "format": format.name(), "bytes": bytes.len() }))
 }
 
-/// Bytes as base64 (RFC 4648, with padding).
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
-        let n = (b(0) << 16) | (b(1) << 8) | b(2);
-        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            let digit = ALPHABET.get(((n >> shift) & 63) as usize).copied().unwrap_or(b'=');
-            out.push(if i <= chunk.len() { char::from(digit) } else { '=' });
-        }
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FileUnpack {
+    /// The file's name, as the person's system called it (`Blinky.zip`, `board.kicad_pcb`).
+    name: String,
+    /// The file's bytes, as base64.
+    data: String,
+    /// The folder to put it in, which must not exist yet.
+    folder: String,
+}
+
+fn file_unpack(s: &mut Session, p: FileUnpack) -> Result<Value, EngineError> {
+    // A plain file name: the person's system named it, and it decides nothing about where it goes.
+    let plain = Path::new(&p.name).file_name().is_some_and(|n| n == p.name.as_str()) && !p.name.contains(['/', '\\', ':']) && p.name != "..";
+    if !plain {
+        return Err(bad(format!("{:?} is not a plain file name", p.name.chars().take(80).collect::<String>())));
     }
-    out
+    // Base64 is four characters for three bytes: a limit on the text is a limit on the bytes.
+    if p.data.len() as u64 > native::MAX_FILE_BYTES / 3 * 4 + 4 {
+        return Err(bad(format!("the file is larger than {} bytes", native::MAX_FILE_BYTES)));
+    }
+    let bytes = crate::base64::decode(&p.data).ok_or_else(|| bad("`data` is not base64"))?;
+    let folder = Path::new(&p.folder);
+    // A folder of its own, named by plain names: an empty path or one through `..` can name a
+    // folder that is there although asking for it fails, such as the working folder.
+    if !circuitcraft_io::archive::new_folder_path(folder) {
+        return Err(bad("`folder` must name a new folder, by plain names (no `..`)"));
+    }
+    // A new folder each time: what is there, an earlier pick or a person's files, stays as it is.
+    if s.storage().kind(folder).is_ok() {
+        return Err(failed(format!("{} is there already; files are taken into a new folder", p.folder)));
+    }
+    let name = Path::new(&p.name);
+    let path = if name.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+        let unpacked = circuitcraft_io::archive::unpack(&bytes, s.storage(), folder).map_err(|e| failed(e.to_string()))?;
+        to_open(s.storage(), unpacked)
+    } else {
+        let path = folder.join(name);
+        // Made in one step nobody can come between, so two sessions can't both write into it.
+        s.storage().create_new_folder(folder).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => failed(format!("{} is there already; files are taken into a new folder", p.folder)),
+            _ => failed(format!("cannot make {}: {e}", p.folder)),
+        })?;
+        s.storage().write(&path, &bytes).map_err(|e| failed(format!("cannot write {}: {e}", path.display())))?;
+        path
+    };
+    Ok(json!({ "path": path.to_string_lossy() }))
+}
+
+/// What to open in an unpacked folder: the folder, when it holds a project or no single board;
+/// the board file, when it holds one and no project (a zipped KiCad or EAGLE board).
+fn to_open(storage: &dyn circuitcraft_io::storage::Storage, folder: PathBuf) -> PathBuf {
+    let files = storage.files(&folder).unwrap_or_default();
+    let extension = |p: &PathBuf| p.extension().and_then(|e| e.to_str()).map(str::to_owned);
+    if files.iter().any(|p| extension(p).as_deref() == Some(native::PROJECT_EXT)) {
+        return folder;
+    }
+    // Our own board file goes by its exact extension, as file.open opens it; another program's
+    // board is told by its content, so its extension may come in any case (`Blinky.BRD`).
+    let board =
+        |p: &&PathBuf| extension(p).is_some_and(|e| e == native::BOARD_EXT || ["kicad_pcb", "brd"].contains(&e.to_ascii_lowercase().as_str()));
+    match files.iter().filter(board).collect::<Vec<_>>().as_slice() {
+        [board] => (*board).clone(),
+        _ => folder,
+    }
+}
+
+fn file_zip(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
+    let folder = s.folder().map(Path::to_path_buf).ok_or_else(|| bad("the open board has no folder until it is saved"))?;
+    let bytes = circuitcraft_io::archive::pack(s.storage(), &folder).map_err(|e| failed(e.to_string()))?;
+    let name = format!("{}.zip", folder.file_name().map_or_else(|| "project".into(), |n| n.to_string_lossy()));
+    Ok(json!({ "name": name, "bytes": bytes.len(), "data": crate::base64::encode(&bytes) }))
 }
 
 fn project_info(s: &mut Session, _: NoParams) -> Result<Value, EngineError> {
@@ -1032,6 +1138,48 @@ mod tests {
     /// The same for the path a test expects.
     fn at(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
+    }
+
+    /// Memory where another session gets in between: right after a folder is first found not to be
+    /// there, it makes that folder and puts a file of its own in it.
+    #[derive(Debug, Default)]
+    struct Racing {
+        memory: MemoryStorage,
+        raced: std::sync::atomic::AtomicBool,
+    }
+
+    impl circuitcraft_io::storage::Storage for Racing {
+        fn kind(&self, path: &Path) -> std::io::Result<Kind> {
+            let kind = self.memory.kind(path);
+            if kind.is_err() && !self.raced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.memory.write(&path.join("theirs"), b"theirs")?;
+            }
+            kind
+        }
+        fn read(&self, path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+            self.memory.read(path, limit)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.memory.write(path, bytes)
+        }
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.memory.remove(path)
+        }
+        fn create_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_folder(folder)
+        }
+        fn create_new_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_new_folder(folder)
+        }
+        fn files(&self, folder: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.memory.files(folder)
+        }
+        fn absolute(&self, path: &Path) -> std::io::Result<PathBuf> {
+            self.memory.absolute(path)
+        }
+        fn recovery_folder(&self) -> Option<PathBuf> {
+            None
+        }
     }
 
     /// A session on files in `memory`, which other sessions can share.
@@ -1354,7 +1502,7 @@ mod tests {
         use circuitcraft_model::layer_ids::{BOTTOM_COPPER, OUTLINE, TOP_COPPER, TOP_SILK};
         let mut s = Session::in_memory();
         let view = |s: &mut Session| s.execute("project.info", &Value::Null).expect("info")["documents"][0]["view"].clone();
-        let fresh = json!({ "activeLayer": "Top Copper", "singleLayer": false, "highlight": null, "hiddenLayers": [] });
+        let fresh = json!({ "activeLayer": "Top Copper", "singleLayer": false, "highlight": null, "hiddenLayers": [], "camera": null });
         assert_eq!(view(&mut s), fresh);
         assert!(s.layer_visible(TOP_SILK) && !s.layer_visible(circuitcraft_model::LayerId(999)));
         s.execute("net.add", &json!({ "name": "GND" })).expect("net");
@@ -1363,7 +1511,8 @@ mod tests {
         s.execute("view.layer", &json!({ "layer": "Top Paste", "visible": false })).expect("hide");
         s.execute("view.layer", &json!({ "layer": "Top Paste", "visible": true })).expect("show");
         s.execute("view.highlight", &json!({ "net": "GND" })).expect("highlight");
-        let set = json!({ "activeLayer": "Bottom Copper", "singleLayer": false, "highlight": "GND", "hiddenLayers": ["Top Silkscreen"] });
+        let set =
+            json!({ "activeLayer": "Bottom Copper", "singleLayer": false, "highlight": "GND", "hiddenLayers": ["Top Silkscreen"], "camera": null });
         assert_eq!(view(&mut s), set);
         assert_eq!((s.active_layer(), s.highlight().is_some()), (Some(BOTTOM_COPPER), true));
         assert!(!s.layer_visible(TOP_SILK) && s.layer_visible(TOP_COPPER));
@@ -1394,7 +1543,7 @@ mod tests {
         s.execute("edit.undo", &Value::Null).expect("undo");
         assert_eq!(
             view(&mut s),
-            json!({ "activeLayer": "Bottom Copper", "singleLayer": false, "highlight": null, "hiddenLayers": ["Top Silkscreen"] })
+            json!({ "activeLayer": "Bottom Copper", "singleLayer": false, "highlight": null, "hiddenLayers": ["Top Silkscreen"], "camera": null })
         );
     }
 
@@ -1881,12 +2030,6 @@ mod tests {
     }
 
     #[test]
-    fn base64_is_the_standard_alphabet_with_padding() {
-        assert_eq!([base64(b""), base64(b"f"), base64(b"fo"), base64(b"foo"), base64(b"foob")], ["", "Zg==", "Zm8=", "Zm9v", "Zm9vYg=="]);
-        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
-    }
-
-    #[test]
     fn the_board_is_drawn_as_the_view_shows_it() {
         let mut s = Session::in_memory();
         let empty = s.execute("view.render", &Value::Null).expect("render");
@@ -1968,5 +2111,99 @@ mod tests {
         assert_eq!(picture["bytes"], json!(written("picture").len()));
         // It changes no board and nothing the board is kept for.
         assert!(s.modified() && s.folder().is_none());
+    }
+
+    #[test]
+    fn the_camera_is_set_reported_and_fitted_again() {
+        let mut s = Session::in_memory();
+        assert!(s.camera().is_none() && s.execute("project.info", &Value::Null).expect("info")["documents"][0]["view"]["camera"].is_null());
+        let view = s.execute("view.camera", &json!({ "center": [10, -5.5], "pixelsPerMm": 40 })).expect("camera");
+        assert_eq!(view["camera"], json!({ "center": [10.0, -5.5], "pixelsPerMm": 40.0 }));
+        assert_eq!(s.camera(), Some(crate::Camera { center: Point::new(Nm(10_000_000), Nm(-5_500_000)), nm_per_pixel: 25_000 }));
+        // The view is not the design: it is not undone, and the board is not modified by it.
+        assert!(s.doc().undo_label().is_none() && !s.modified());
+        assert!(s.execute("view.fit", &Value::Null).expect("fit")["camera"].is_null() && s.camera().is_none());
+        let bad = |s: &mut Session, p: Value| matches!(s.execute("view.camera", &p), Err(EngineError::BadParams(_)));
+        for ppm in [0.0, -1.0, 0.00001, 2e6] {
+            assert!(bad(&mut s, json!({ "center": [0, 0], "pixelsPerMm": ppm })), "{ppm}");
+        }
+        assert!(bad(&mut s, json!({ "center": [1e30, 0], "pixelsPerMm": 10 })));
+        assert!(bad(&mut s, json!({ "center": [0], "pixelsPerMm": 10 })));
+        // Each board keeps its own camera: a new board is fitted, and undo brings the old one back.
+        s.execute("view.camera", &json!({ "center": [1, 1], "pixelsPerMm": 10 })).expect("camera");
+        s.execute("board.new", &Value::Null).expect("new");
+        assert!(s.camera().is_none());
+        s.execute("edit.undo", &Value::Null).expect("undo");
+        assert_eq!(s.camera().map(|c| c.nm_per_pixel), Some(100_000));
+    }
+
+    #[test]
+    fn a_project_is_zipped_and_taken_in_again_as_the_browser_does() {
+        let memory = Arc::new(MemoryStorage::default());
+        let mut s = sharing(&memory);
+        s.execute("board.new", &json!({ "name": "Blinky" })).expect("new");
+        s.execute("net.add", &json!({ "name": "GND" })).expect("net");
+        assert!(matches!(s.execute("file.zip", &Value::Null), Err(EngineError::BadParams(_))), "nothing saved to zip yet");
+        s.execute("file.save", &json!({ "path": "/projects/Blinky" })).expect("save");
+        let zipped = s.execute("file.zip", &Value::Null).expect("zip");
+        assert_eq!((&zipped["name"], zipped["bytes"].as_u64().is_some_and(|n| n > 0)), (&json!("Blinky.zip"), true));
+        assert!(s.execute("file.zip", &json!({ "path": "/projects" })).is_err(), "only the open board's folder is zipped");
+        // Another session, as a browser after a reload, takes the zip in and opens it.
+        let mut other = Session::in_memory();
+        let unpack = |s: &mut Session, name: &str, data: &Value, folder: &str| {
+            s.execute("file.unpack", &json!({ "name": name, "data": data, "folder": folder }))
+        };
+        let taken = unpack(&mut other, "Blinky.zip", &zipped["data"], "/received/1").expect("unpack");
+        assert_eq!(path(&taken["path"]), at("/received/1/Blinky"));
+        other.execute("file.open", &json!({ "path": taken["path"] })).expect("open");
+        assert!(other.board().net_by_name("GND").is_some() && other.board().name == "Blinky");
+        // The same folder again is refused: nothing there is replaced.
+        assert!(matches!(unpack(&mut other, "Blinky.zip", &zipped["data"], "/received/1"), Err(EngineError::Failed(_))));
+        // A single board file is written as it is, into a folder of its own.
+        let board = memory.snapshot().into_iter().find(|(p, _)| p.extension().is_some_and(|e| e == "ccpcb")).map(|(_, b)| b).expect("a board file");
+        let data = json!(crate::base64::encode(&board));
+        let one = unpack(&mut other, "Blinky.ccpcb", &data, "/received/2").expect("file");
+        assert_eq!(path(&one["path"]), at("/received/2/Blinky.ccpcb"));
+        // Opened from there, it saves and zips its own files only.
+        other.execute("file.open", &json!({ "path": one["path"] })).expect("open");
+        other.execute("file.save", &Value::Null).expect("save");
+        assert_eq!(other.execute("file.zip", &Value::Null).expect("zip")["name"], "2.zip");
+        // A zip of a single board, as a KiCad or EAGLE board may come, opens that board.
+        let zipped_board = {
+            let files = MemoryStorage::default();
+            files.write(Path::new("/z/Blinky.ccpcb"), &board).expect("write");
+            crate::base64::encode(&circuitcraft_io::archive::pack(&files, Path::new("/z")).expect("pack"))
+        };
+        let single = unpack(&mut other, "z.zip", &json!(zipped_board), "/received/3").expect("zip");
+        assert_eq!(path(&single["path"]), at("/received/3/z/Blinky.ccpcb"));
+        // Another program's board in a zip opens whatever the case of its extension; our own
+        // goes by its exact one, as file.open opens it.
+        for (name, found) in [("Blinky.BRD", true), ("Blinky.KICAD_PCB", true), ("Blinky.kicad_pcb", true), ("Blinky.CCPCB", false)] {
+            let files = MemoryStorage::default();
+            files.write(&Path::new("/z").join(name), b"board").expect("write");
+            let opened = to_open(&files, PathBuf::from("/z"));
+            assert_eq!(opened == Path::new("/z").join(name), found, "{name}");
+        }
+        // Another session makes the folder between the look and the making: the file is refused,
+        // and the other session's file stays as it was.
+        let racing = Arc::new(Racing::default());
+        let mut late = Session::with_storage(Box::new(racing.clone()));
+        let refused = unpack(&mut late, "theirs", &json!("bWluZQ=="), "/race");
+        assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("is there already")), "{refused:?}");
+        assert_eq!(racing.memory.read(Path::new("/race/theirs"), 10).expect("read"), b"theirs");
+        // A file is never written over one that is there.
+        memory.write(Path::new("/x/precious.ccpcb"), b"keep").expect("write");
+        let mut on_memory = sharing(&memory);
+        assert!(unpack(&mut on_memory, "precious.ccpcb", &json!("anVuaw=="), "/x").is_err());
+        // An empty or a root folder is no folder of its own: on the desktop it would be the
+        // working folder, which would be written into.
+        for folder in ["", ".", "/", "./.", "nothere/..", "x/y/../..", "/x/new/.."] {
+            assert!(matches!(unpack(&mut on_memory, "precious.ccpcb", &json!("anVuaw=="), folder), Err(EngineError::BadParams(_))), "{folder:?}");
+        }
+        assert_eq!(memory.read(Path::new("/x/precious.ccpcb"), 10).expect("read"), b"keep");
+        // Refused: a name with a folder in it, data that isn't base64, a zip that isn't one.
+        for (name, data) in [("../x.ccpcb", ""), ("a/b.ccpcb", ""), ("x.ccpcb", "not base64!"), ("x.zip", "Zm9v")] {
+            assert!(unpack(&mut other, name, &json!(data), "/received/9").is_err(), "{name}");
+        }
     }
 }

@@ -1190,6 +1190,9 @@ mod tests {
         fn create_folder(&self, _: &Path) -> std::io::Result<()> {
             Ok(())
         }
+        fn create_new_folder(&self, _: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
         fn files(&self, _: &Path) -> std::io::Result<Vec<PathBuf>> {
             Ok(Vec::new())
         }

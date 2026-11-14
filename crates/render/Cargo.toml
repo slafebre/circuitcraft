@@ -17,3 +17,4 @@ circuitcraft-geom = { workspace = true }
 circuitcraft-model = { workspace = true }
 thiserror = { workspace = true }
 tiny-skia = { workspace = true }
+i_triangle = { workspace = true }
