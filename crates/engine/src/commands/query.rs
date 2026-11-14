@@ -10,6 +10,7 @@ use crate::{EngineError, Session};
 use circuitcraft_geom::{Arc, Contour, Edge, Rect};
 use circuitcraft_model::{
     Board, Footprint, Graphic, GraphicShape, Hole, ItemId, Justify, LayerId, LayerStack, NetId, Opening, Pad, PadShape, Rotation, Side, TrackPath,
+    text_point,
 };
 use circuitcraft_units::{Nm, Point};
 use schemars::JsonSchema;
@@ -348,7 +349,7 @@ fn collect_rest(board: &Board, f: &Filter, page: &mut Page) {
     }
     if f.wants(Kind::Hole) && f.layer.is_none() {
         for h in board.holes.iter() {
-            let place = |p: Point| add(p, h.position);
+            let place = |p: Point| p.shifted(h.position);
             let exact = |a: Rect| hole_ends(h.hole, &place, Rotation(0)).is_some_and(|(x, y)| capsule_touches(a, x, y, half(h.hole.diameter)));
             if f.area(|| hole_extent(h.hole, &place, Rotation(0)), exact) {
                 page.offer(|| hole_json(h.id, h.position, h.hole));
@@ -636,7 +637,7 @@ fn pad_json(board: &Board, fp: &Footprint, index: usize, pad: &Pad, full: bool) 
     let stack = &board.stack;
     let mut v = json!({
         "kind": "pad", "footprint": fp.id.to_string(), "reference": fp.reference, "number": pad.number, "index": index,
-        "at": fp.to_board(pad.position).map(xy), "net": net_name(board, pad.net),
+        "at": fp.pad_to_board(pad, Point::ORIGIN).map(xy), "net": net_name(board, pad.net),
         "layers": pad_layers(stack, fp, pad).iter().filter_map(|&l| layer_name(stack, l)).collect::<Vec<_>>(),
     });
     if full {
@@ -743,10 +744,6 @@ fn pad_layers(stack: &LayerStack, fp: &Footprint, pad: &Pad) -> Vec<LayerId> {
         .collect()
 }
 
-fn add(a: Point, b: Point) -> Option<Point> {
-    Some(Point::new(Nm(a.x.0.checked_add(b.x.0)?), Nm(a.y.0.checked_add(b.y.0)?)))
-}
-
 fn half(n: Nm) -> Nm {
     Nm(n.0 / 2)
 }
@@ -827,18 +824,10 @@ fn graphic_extent(g: &Graphic, place: &dyn Fn(Point) -> Option<Point>) -> Option
     Some(grow(r, half(g.width)))
 }
 
-/// The ends of the line a hole at `place(0, 0)` is drilled along, a slot turned by `turn` and its
-/// own rotation; both are its centre for a round hole.
+/// The ends of the line a hole at `place(0, 0)` is drilled along ([`Hole::ends`]), on the board.
 fn hole_ends(hole: Hole, place: &dyn Fn(Point) -> Option<Point>, turn: Rotation) -> Option<(Point, Point)> {
-    match hole.slot {
-        None => place(Point::ORIGIN).map(|c| (c, c)),
-        Some(slot) => {
-            let reach = slot.length.0.saturating_sub(hole.diameter.0).max(0) / 2;
-            let turn = Rotation::from_millidegrees(i64::from(turn.0) + i64::from(slot.rotation.0));
-            let end = |x: i64| turn.turn(Point::new(Nm(x), Nm(0))).and_then(place);
-            Some((end(-reach)?, end(reach)?))
-        }
-    }
+    let (a, b) = hole.ends(turn)?;
+    Some((place(a)?, place(b)?))
 }
 
 /// The box around a hole at `place(0, 0)`, a slot turned by `turn` and its own rotation.
@@ -849,15 +838,14 @@ fn hole_extent(hole: Hole, place: &dyn Fn(Point) -> Option<Point>, turn: Rotatio
 
 /// The box around a pad's copper and hole on the board; just its place when it has neither.
 fn pad_extent(fp: &Footprint, pad: &Pad) -> Option<Rect> {
-    // A point of the copper, relative to its centre, on the board.
-    let copper = |p: Point| fp.to_board(add(pad.rotation.turn(add(p, pad.copper_offset)?)?, pad.position)?);
+    let copper = |p: Point| fp.pad_copper_to_board(pad, p);
     let faces = [pad.front.as_ref().map(|f| &f.shape), pad.inner.as_ref(), pad.back.as_ref().map(|f| &f.shape)];
     let mut r = faces.into_iter().flatten().fold(None, |r, shape| union(r, shape_extent(shape, &copper)));
     if let Some(hole) = pad.hole {
-        let centre = |p: Point| fp.to_board(add(p, pad.position)?);
+        let centre = |p: Point| fp.pad_to_board(pad, p);
         r = union(r, hole_extent(hole, &centre, pad.rotation));
     }
-    r.or_else(|| fp.to_board(pad.position).map(spot))
+    r.or_else(|| fp.pad_to_board(pad, Point::ORIGIN).map(spot))
 }
 
 /// The box around a pad shape whose points, relative to its centre, `place` puts on the board.
@@ -898,10 +886,7 @@ fn text_extent(
     place: &dyn Fn(Point) -> Option<Point>,
 ) -> Option<Rect> {
     let laid = circuitcraft_render::font::layout(words, height, justify);
-    let points = laid.into_iter().flatten().filter_map(|p| {
-        let p = if mirrored { Point::new(Nm(p.x.0.checked_neg()?), p.y) } else { p };
-        place(add(rotation.turn(p)?, position)?)
-    });
+    let points = laid.into_iter().flatten().filter_map(|p| place(text_point(p, mirrored, rotation, position)?));
     match Rect::bounding(points) {
         Some(r) => Some(grow(r, half(stroke))),
         None => place(position).map(spot),

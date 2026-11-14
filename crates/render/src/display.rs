@@ -10,7 +10,7 @@ use crate::font;
 use crate::{Rgba, layer_color};
 use circuitcraft_geom::{Contour, Edge, Polygon, Rect, offset};
 use circuitcraft_model::{
-    Board, Footprint, Graphic, GraphicShape, Hole, Justify, LayerId, LayerKind, LayerStack, NetId, Pad, PadShape, Rotation, Side,
+    Board, Footprint, Graphic, GraphicShape, Hole, Justify, LayerId, LayerKind, LayerStack, NetId, Pad, PadShape, Rotation, Side, text_point,
 };
 use circuitcraft_units::{Nm, Point};
 use std::collections::{BTreeMap, BTreeSet};
@@ -256,7 +256,7 @@ impl<'a> Sink<'a> {
             }
         }
         for h in board.holes.iter() {
-            self.hole(h.hole, &|p| add(p, h.position), Rotation(0));
+            self.hole(h.hole, &|p| p.shifted(h.position), Rotation(0));
         }
         for t in board.texts.iter() {
             self.text(t.layer, &t.text, t.height, t.stroke, t.justify, t.mirrored, t.rotation, t.position, &Some);
@@ -313,12 +313,7 @@ impl<'a> Sink<'a> {
         let radius = Nm(hole.diameter.0 / 2);
         let shape = match hole.slot {
             None => place(Point::ORIGIN).map(|center| Shape::Disc { center, radius }),
-            Some(slot) => {
-                let half = slot.length.0.saturating_sub(hole.diameter.0).max(0) / 2;
-                let turn = Rotation::from_millidegrees(i64::from(turn.0) + i64::from(slot.rotation.0));
-                let end = |x: i64| turn.turn(Point::new(Nm(x), Nm(0))).and_then(place);
-                end(-half).zip(end(half)).map(|(a, b)| Shape::Stroke { points: vec![a, b], width: hole.diameter })
-            }
+            Some(_) => hole.ends(turn).and_then(|(a, b)| Some(Shape::Stroke { points: vec![place(a)?, place(b)?], width: hole.diameter })),
         };
         self.holes.extend(shape);
     }
@@ -342,10 +337,7 @@ impl<'a> Sink<'a> {
             return;
         }
         for line in font::layout(words, height, justify) {
-            let points = line.into_iter().filter_map(|p| {
-                let p = if mirrored { Point::new(Nm(p.x.0.checked_neg()?), p.y) } else { p };
-                place(add(rotation.turn(p)?, position)?)
-            });
+            let points = line.into_iter().filter_map(|p| place(text_point(p, mirrored, rotation, position)?));
             if let Some(shape) = stroke(points.collect(), width) {
                 self.put(layer, None, shape);
             }
@@ -420,7 +412,7 @@ impl<'a> Sink<'a> {
         let stack = &self.board.stack;
         let design = self.board.design;
         // A point of the copper, relative to its centre, on the board.
-        let copper = |p: Point| f.to_board(add(pad.rotation.turn(add(p, pad.copper_offset)?)?, pad.position)?);
+        let copper = |p: Point| f.pad_copper_to_board(pad, p);
         let copper_layers: Vec<LayerId> = stack.copper().map(|l| l.id).collect();
         let inner = copper_layers.get(1..copper_layers.len().saturating_sub(1)).unwrap_or_default();
         let faces = [(f.side, &pad.front), (f.side.opposite(), &pad.back)];
@@ -447,7 +439,7 @@ impl<'a> Sink<'a> {
         }
         if let Some(hole) = pad.hole {
             // The hole is centred on the pad's position, not on its copper.
-            let centre = |p: Point| f.to_board(add(p, pad.position)?);
+            let centre = |p: Point| f.pad_to_board(pad, p);
             self.hole(hole, &centre, pad.rotation);
         }
     }
@@ -539,11 +531,6 @@ fn stroke(mut points: Vec<Point>, width: Nm) -> Option<Shape> {
         points.push(first);
     }
     Some(Shape::Stroke { points, width })
-}
-
-/// `p + q`, or `None` when it overflows.
-fn add(p: Point, q: Point) -> Option<Point> {
-    Some(Point::new(Nm(p.x.0.checked_add(q.x.0)?), Nm(p.y.0.checked_add(q.y.0)?)))
 }
 
 /// A rectangle with rounded corners centred on the origin, as a contour with arcs. The radius is
