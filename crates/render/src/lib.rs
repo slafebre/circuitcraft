@@ -7,12 +7,14 @@
 
 mod display;
 pub mod font;
+mod mesh;
 mod raster;
 mod svg;
 
 pub use display::{
     AREA_LINE_WIDTH, BACKGROUND, DisplayList, Group, GroupKind, HAIRLINE, HIGHLIGHT, OUTLINE_WIDTH, Options, Shape, TOLERANCE, display_list,
 };
+pub use mesh::{GroupMesh, meshes};
 pub use raster::{MAX_PIXELS, MAX_SIDE, png};
 pub use svg::svg;
 

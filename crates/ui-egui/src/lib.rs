@@ -4,9 +4,14 @@
 //! built from the command table, so a new command with a menu path appears without UI changes.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod board_view;
+mod files;
+
+use board_view::BoardView;
 use circuitcraft_engine::{COMMANDS, CommandSpec, Session};
 use circuitcraft_render::layer_color;
-use egui::{Color32, RichText, Stroke, pos2, vec2};
+use circuitcraft_units::Point;
+use egui::{Color32, RichText, vec2};
 use serde_json::Value;
 
 /// Colours of the application chrome (CircuitCraft's own dark theme).
@@ -14,13 +19,13 @@ mod theme {
     use egui::Color32;
     pub const CHROME: Color32 = Color32::from_rgb(38, 42, 48);
     pub const CHROME_DARK: Color32 = Color32::from_rgb(30, 33, 38);
-    pub const CANVAS: Color32 = Color32::from_rgb(16, 18, 22);
-    pub const GRID: Color32 = Color32::from_rgb(34, 38, 46);
+    /// The canvas behind the board: the renderer's background, which holes show too.
+    pub const CANVAS: Color32 = {
+        let [r, g, b, _] = circuitcraft_render::BACKGROUND.0;
+        Color32::from_rgb(r, g, b)
+    };
     pub const TEXT_DIM: Color32 = Color32::from_rgb(140, 146, 156);
 }
-
-/// Grid spacing on screen, in points.
-const GRID_STEP: f32 = 24.0;
 
 /// How often unsaved work is written to the recovery folder, in seconds. A crash (and in the
 /// browser any panic, which aborts) loses at most this much work.
@@ -48,13 +53,31 @@ pub struct CircuitApp {
     discarding: Option<String>,
     /// When unsaved work was last looked after, in seconds since the app started.
     autosaved_at: f64,
+    /// The board drawn on the canvas.
+    view: BoardView,
+    /// The board point under the pointer, while it is over the canvas.
+    pointer: Option<Point>,
+    /// Files the browser's file picker handed over, waiting to be opened. The desktop's dialogs
+    /// answer at once, so there it stays empty.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    inbox: files::Inbox,
 }
 
 impl CircuitApp {
     /// An app showing `session`. If an earlier session left unsaved work behind, the status bar
     /// says how to get it back.
     pub fn new(session: Session) -> CircuitApp {
-        let mut app = CircuitApp { session, status: "Ready".to_owned(), result: None, unsaved: None, discarding: None, autosaved_at: 0.0 };
+        let mut app = CircuitApp {
+            session,
+            status: "Ready".to_owned(),
+            result: None,
+            unsaved: None,
+            discarding: None,
+            autosaved_at: 0.0,
+            view: BoardView::default(),
+            pointer: None,
+            inbox: files::Inbox::default(),
+        };
         app.list_unsaved();
         if app.unsaved.is_some() {
             app.status = "Unsaved work was found: recover it or discard it (File > Unsaved Work)".to_owned();
@@ -94,7 +117,8 @@ impl CircuitApp {
     }
 
     /// Runs a command the way every UI element does, and reports the outcome in the status bar.
-    pub fn run(&mut self, id: &str, params: &Value) {
+    /// Returns whether it succeeded.
+    pub fn run(&mut self, id: &str, params: &Value) -> bool {
         let outcome = self.session.execute(id, params);
         // Unsaved work is offered in a window with buttons, which is kept up to date: also when
         // the command failed, which may be because another session took what was listed.
@@ -118,12 +142,17 @@ impl CircuitApp {
                     self.result = Some((label.to_owned(), text));
                 }
             }
-            Err(e) => self.status = format!("{id}: {e}"),
+            Err(e) => {
+                self.status = format!("{id}: {e}");
+                return false;
+            }
         }
+        true
     }
 
     /// Draws one frame.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        self.take_in_picked();
         self.keep_unsaved_work(ui.input(|i| i.time));
         // Nothing else may wake the app up before unsaved work is due again.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(AUTOSAVE_SECONDS));
@@ -186,17 +215,31 @@ impl CircuitApp {
     /// discards) or on Keep (`None`: nothing is discarded).
     fn press_discard(&mut self, id: Option<String>) {
         match id {
-            Some(id) if self.discarding.as_deref() == Some(id.as_str()) => self.run("recovery.discard", &serde_json::json!({ "id": id })),
+            Some(id) if self.discarding.as_deref() == Some(id.as_str()) => {
+                self.run("recovery.discard", &serde_json::json!({ "id": id }));
+            }
             asked => self.discarding = asked,
         }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let mut clicked: Option<&'static str> = None;
+        let mut file_action = None;
         egui::Panel::top("cc_menubar").frame(egui::Frame::NONE.fill(theme::CHROME_DARK).inner_margin(4)).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 for menu in menu_names() {
                     ui.menu_button(menu, |ui| {
+                        // Opening and saving ask where, in a dialog, before they run a command.
+                        if menu == "File" {
+                            for (label, action) in
+                                [("Open…", files::FileAction::Open), ("Save", files::FileAction::Save), ("Save As…", files::FileAction::SaveAs)]
+                            {
+                                if ui.button(label).clicked() {
+                                    file_action = Some(action);
+                                }
+                            }
+                            ui.separator();
+                        }
                         for (label, spec) in menu_items(menu) {
                             if ui.button(label).clicked() {
                                 clicked = Some(spec.id);
@@ -209,23 +252,39 @@ impl CircuitApp {
         if let Some(id) = clicked {
             self.run(id, &Value::Null);
         }
+        if let Some(action) = file_action {
+            self.file_action(action, ui.ctx());
+        }
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
         egui::Panel::bottom("cc_status").frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(4)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).color(theme::TEXT_DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(p) = self.pointer {
+                        ui.label(RichText::new(format!("x {:.3}  y {:.3} mm", p.x.to_mm(), p.y.to_mm())).color(theme::TEXT_DIM).monospace());
+                    }
+                });
             });
         });
     }
 
+    /// A tab for each layer: its colour, a box that shows or hides it, and its name, which makes
+    /// it the active layer; and a switch for single-layer mode.
     fn layer_tabs(&mut self, ui: &mut egui::Ui) {
-        let stack = &self.session.board().stack;
-        let active = self.session.active_layer();
+        let session = &self.session;
+        let stack = &session.board().stack;
+        let active = session.active_layer();
+        let mut single = session.single_layer();
         let mut copper_index = 0;
         let mut chosen = None;
+        let mut shown = None;
+        let mut single_changed = false;
         egui::Panel::bottom("cc_layer_tabs").frame(egui::Frame::NONE.fill(theme::CHROME_DARK).inner_margin(4)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                single_changed = ui.toggle_value(&mut single, "Single layer").on_hover_text("Draw only the active layer").changed();
+                ui.separator();
                 for layer in &stack.layers {
                     let [r, g, b, _] = layer_color(layer, copper_index).0;
                     if layer.kind == circuitcraft_model::LayerKind::Copper {
@@ -233,12 +292,22 @@ impl CircuitApp {
                     }
                     let (swatch, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
                     ui.painter().rect_filled(swatch, 2.0, Color32::from_rgb(r, g, b));
+                    let mut visible = !session.layer_hidden(layer.id);
+                    if ui.checkbox(&mut visible, "").on_hover_text(format!("Show or hide {}", layer.name)).changed() {
+                        shown = Some((layer.name.clone(), visible));
+                    }
                     if ui.selectable_label(active == Some(layer.id), &layer.name).clicked() {
                         chosen = Some(layer.name.clone());
                     }
                 }
             });
         });
+        if single_changed {
+            self.run("view.single", &serde_json::json!({ "on": single }));
+        }
+        if let Some((layer, visible)) = shown {
+            self.run("view.layer", &serde_json::json!({ "layer": layer, "visible": visible }));
+        }
         if let Some(layer) = chosen {
             self.run("view.active", &serde_json::json!({ "layer": layer }));
         }
@@ -255,8 +324,11 @@ impl CircuitApp {
         });
     }
 
-    fn properties_panel(&self, ui: &mut egui::Ui) {
-        let stack = &self.session.board().stack;
+    fn properties_panel(&mut self, ui: &mut egui::Ui) {
+        let board = self.session.board();
+        let stack = &board.stack;
+        let highlighted = self.session.highlight().and_then(|id| board.nets.get(id)).map(|n| n.name.clone());
+        let mut pick: Option<Option<String>> = None;
         egui::Panel::right("cc_properties").default_size(240.0).frame(egui::Frame::NONE.fill(theme::CHROME).inner_margin(8)).show(ui, |ui| {
             ui.strong("Properties");
             ui.separator();
@@ -270,31 +342,55 @@ impl CircuitApp {
                     ui.label(format!("Layer thickness: {:.3} mm", t.to_mm()));
                 }
             }
+            if !board.nets.is_empty() {
+                ui.separator();
+                let mut names: Vec<&str> = board.nets.iter().map(|n| n.name.as_str()).collect();
+                names.sort_unstable();
+                egui::ComboBox::from_label("Highlight").selected_text(highlighted.as_deref().unwrap_or("No net")).show_ui(ui, |ui| {
+                    if ui.selectable_label(highlighted.is_none(), "No net").clicked() {
+                        pick = Some(None);
+                    }
+                    for name in names {
+                        if ui.selectable_label(highlighted.as_deref() == Some(name), name).clicked() {
+                            pick = Some(Some(name.to_owned()));
+                        }
+                    }
+                });
+            }
         });
+        if let Some(net) = pick {
+            self.run("view.highlight", &serde_json::json!({ "net": net }));
+        }
     }
 
-    fn canvas(&self, ui: &mut egui::Ui) {
+    /// The board view: the board drawn as the session's view shows it, panned by dragging,
+    /// zoomed by scrolling or pinching, fitted again by a double click.
+    fn canvas(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::CANVAS)).show(ui, |ui| {
             let rect = ui.max_rect();
+            let response = ui.interact(rect, ui.scope_id().with("board_view"), egui::Sense::click_and_drag());
+            self.view.update(&self.session);
+            let camera = self.view.camera(&self.session, rect.size());
+            let gesture = ui.input(|input| BoardView::gesture(&response, input, camera));
+            // Moving the view is quiet: it says something only when it fails.
+            if let Some((id, params)) = board_view::command(gesture)
+                && let Err(e) = self.session.execute(id, &params)
+            {
+                self.status = format!("{id}: {e}");
+            }
+            let camera = self.view.camera(&self.session, rect.size());
             let painter = ui.painter_at(rect);
-            let stroke = Stroke::new(1.0, theme::GRID);
-            let mut x = rect.left() + GRID_STEP;
-            while x < rect.right() {
-                painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
-                x += GRID_STEP;
+            self.view.paint(&painter, rect, camera);
+            self.pointer = response.hover_pos().map(|p| BoardView::board_point(rect, camera, p));
+            if self.view.is_empty() {
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "File > Open… opens a board",
+                    egui::FontId::proportional(15.0),
+                    theme::TEXT_DIM,
+                );
             }
-            let mut y = rect.top() + GRID_STEP;
-            while y < rect.bottom() {
-                painter.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], stroke);
-                y += GRID_STEP;
-            }
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "CircuitCraft 0.0 — opening EAGLE and KiCad boards arrives in 0.1",
-                egui::FontId::proportional(15.0),
-                theme::TEXT_DIM,
-            );
         });
     }
 
@@ -435,6 +531,85 @@ mod tests {
         app.run("net.add", &serde_json::json!({ "name": "GND" }));
         app.keep_unsaved_work(AUTOSAVE_SECONDS);
         assert_eq!(app.status, "Add Net: done", "and does not say it again every half minute");
+    }
+
+    /// Runs `frames` frames of the app in a 1200 by 800 window, each with `events`, and returns
+    /// the last frame's output.
+    fn frames(app: &mut CircuitApp, ctx: &egui::Context, frames: usize, events: &dyn Fn(usize) -> Vec<egui::Event>) -> egui::FullOutput {
+        let mut out = egui::FullOutput::default();
+        // Time goes on from the last frame of an earlier call.
+        let start = ctx.input(|i| i.time);
+        for frame in 0..frames {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1_200.0, 800.0))),
+                time: Some(start + (frame + 1) as f64 / 60.0),
+                events: events(frame),
+                ..Default::default()
+            };
+            out = ctx.run_ui(raw, |ui| app.ui(ui));
+            // No GPU takes the font textures here.
+            out.textures_delta.clear();
+        }
+        out
+    }
+
+    #[test]
+    fn the_board_is_drawn_on_the_canvas_and_the_wheel_zooms_it() {
+        let mut session = Session::in_memory();
+        session.execute("track.add", &serde_json::json!({ "layer": "Top Copper", "width": 0.5, "from": [0, 0], "to": [10, 0] })).expect("track");
+        let mut app = CircuitApp::new(session);
+        let ctx = egui::Context::default();
+        let out = frames(&mut app, &ctx, 2, &|_| Vec::new());
+        let meshes = out.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if !m.vertices.is_empty())).count();
+        assert_eq!(meshes, 1, "the track's layer drawn as triangles");
+        assert!(app.session().camera().is_none(), "fitted until someone moves the view");
+        // The wheel over the board zooms about the pointer: one way in, the other way out.
+        let over = egui::pos2(600.0, 400.0);
+        let wheel = |dy: f32| {
+            move |frame: usize| {
+                let mut events = vec![egui::Event::PointerMoved(over)];
+                if frame == 1 {
+                    events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, dy),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                events
+            }
+        };
+        frames(&mut app, &ctx, 3, &wheel(200.0));
+        let closer = app.session().camera().expect("a camera once the view moved");
+        let under = app.pointer.expect("the pointer's place on the board is known");
+        frames(&mut app, &ctx, 3, &wheel(-400.0));
+        let farther = app.session().camera().expect("a camera");
+        assert!(farther.nm_per_pixel > closer.nm_per_pixel, "{} then {}", closer.nm_per_pixel, farther.nm_per_pixel);
+        let still = app.pointer.expect("the pointer's place");
+        let near = |a: i64, b: i64| (a - b).abs() <= 2 * farther.nm_per_pixel;
+        assert!(near(still.x.0, under.x.0) && near(still.y.0, under.y.0), "the point under the pointer stays: {under:?} {still:?}");
+        // Two fingers on a trackpad pan instead: the scale stays, the centre moves.
+        let fingers = |frame: usize| {
+            let mut events = vec![egui::Event::PointerMoved(over)];
+            if frame == 1 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(50.0, 0.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Trackpad,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            events
+        };
+        frames(&mut app, &ctx, 3, &fingers);
+        let panned = app.session().camera().expect("a camera");
+        assert_eq!(panned.nm_per_pixel, farther.nm_per_pixel);
+        assert_eq!(panned.center.x.0, farther.center.x.0 - 50 * farther.nm_per_pixel, "the board follows the fingers to the right");
+        // Zoom to Fit from the View menu shows the whole board again.
+        app.run("view.fit", &Value::Null);
+        assert!(app.session().camera().is_none());
     }
 
     #[test]
