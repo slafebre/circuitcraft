@@ -4,6 +4,7 @@
 //! Every reader treats its input as hostile: no panics, bounded allocations, bounded recursion.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod archive;
 pub mod eagle;
 #[cfg(test)]
 mod fuzz;

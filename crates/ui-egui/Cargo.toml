@@ -13,10 +13,17 @@ workspace = true
 
 [dependencies]
 circuitcraft-engine = { workspace = true }
+circuitcraft-io = { workspace = true }
 circuitcraft-model = { workspace = true }
 circuitcraft-render = { workspace = true }
+circuitcraft-geom = { workspace = true }
+circuitcraft-units = { workspace = true }
 egui = { workspace = true }
+rfd = { workspace = true }
 serde_json = { workspace = true }
 
+# The browser's file dialogs answer through futures.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
 [dev-dependencies]
-circuitcraft-io = { workspace = true }

@@ -44,6 +44,12 @@ pub trait Storage: std::fmt::Debug + Send + Sync {
     /// Makes a folder, and the folders above it, unless they exist.
     fn create_folder(&self, folder: &Path) -> Result<()>;
 
+    /// Makes a folder that must not exist yet, and the folders above it as needed, in one step
+    /// nobody else can come between: when two callers ask for the same new folder, one gets it
+    /// and the other an `AlreadyExists` error. Something that is there already, a folder or a
+    /// file, is an error too.
+    fn create_new_folder(&self, folder: &Path) -> Result<()>;
+
     /// The regular files directly in a folder, sorted, and no more than [`MAX_FOLDER_ENTRIES`] of
     /// what it holds. A folder that doesn't exist has none; a file is not a folder.
     fn files(&self, folder: &Path) -> Result<Vec<PathBuf>>;
@@ -74,6 +80,9 @@ impl<S: Storage + ?Sized> Storage for std::sync::Arc<S> {
     }
     fn create_folder(&self, folder: &Path) -> Result<()> {
         (**self).create_folder(folder)
+    }
+    fn create_new_folder(&self, folder: &Path) -> Result<()> {
+        (**self).create_new_folder(folder)
     }
     fn files(&self, folder: &Path) -> Result<Vec<PathBuf>> {
         (**self).files(folder)
@@ -193,6 +202,14 @@ impl Storage for DiskStorage {
 
     fn create_folder(&self, folder: &Path) -> Result<()> {
         std::fs::create_dir_all(folder)
+    }
+
+    fn create_new_folder(&self, folder: &Path) -> Result<()> {
+        if let Some(parent) = folder.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        // The system makes the folder or reports it is there, in one step.
+        std::fs::create_dir(folder)
     }
 
     fn files(&self, folder: &Path) -> Result<Vec<PathBuf>> {
@@ -352,6 +369,18 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    fn create_new_folder(&self, folder: &Path) -> Result<()> {
+        let folder = rooted(folder);
+        // Asked and made under one lock: nobody can make it in between.
+        let mut memory = self.lock();
+        if memory.files.contains_key(&folder) || memory.is_folder(&folder) {
+            return Err(Error::new(ErrorKind::AlreadyExists, "there already"));
+        }
+        memory.check_way(&folder)?;
+        memory.folders.insert(folder);
+        Ok(())
+    }
+
     fn files(&self, folder: &Path) -> Result<Vec<PathBuf>> {
         let folder = rooted(folder);
         let memory = self.lock();
@@ -428,6 +457,13 @@ mod tests {
         s.remove(&file).expect("removing what isn't there is fine");
         assert!(s.kind(&file).is_err());
         assert_eq!(s.files(&folder).expect("files"), [folder.join("b.txt")]);
+        // A new folder is made once: asked for again, or where a file or a folder is, it is refused.
+        let fresh = folder.join("new/inner");
+        s.create_new_folder(&fresh).expect("a new folder, and the one above it");
+        assert!(matches!(s.kind(&fresh), Ok(Kind::Folder)));
+        assert_eq!(s.create_new_folder(&fresh).map_err(|e| e.kind()), Err(ErrorKind::AlreadyExists));
+        assert!(s.create_new_folder(&folder.join("new")).is_err(), "a folder that is there");
+        assert!(s.create_new_folder(&folder.join("b.txt")).is_err(), "a file that is there");
         // From the root: on Windows a path in memory has a root and no drive, which
         // `is_absolute` there doesn't count as absolute.
         assert!(s.absolute(Path::new("x/y.txt")).is_ok_and(|p| p.has_root() && p.ends_with("x/y.txt")));
