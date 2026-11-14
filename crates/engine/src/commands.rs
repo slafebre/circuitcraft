@@ -964,7 +964,11 @@ fn file_unpack(s: &mut Session, p: FileUnpack) -> Result<Value, EngineError> {
         to_open(s.storage(), unpacked)
     } else {
         let path = folder.join(name);
-        s.storage().create_folder(folder).map_err(|e| failed(format!("cannot make {}: {e}", p.folder)))?;
+        // Made in one step nobody can come between, so two sessions can't both write into it.
+        s.storage().create_new_folder(folder).map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => failed(format!("{} is there already; files are taken into a new folder", p.folder)),
+            _ => failed(format!("cannot make {}: {e}", p.folder)),
+        })?;
         s.storage().write(&path, &bytes).map_err(|e| failed(format!("cannot write {}: {e}", path.display())))?;
         path
     };
@@ -975,11 +979,15 @@ fn file_unpack(s: &mut Session, p: FileUnpack) -> Result<Value, EngineError> {
 /// the board file, when it holds one and no project (a zipped KiCad or EAGLE board).
 fn to_open(storage: &dyn circuitcraft_io::storage::Storage, folder: PathBuf) -> PathBuf {
     let files = storage.files(&folder).unwrap_or_default();
-    let kind = |p: &PathBuf, kinds: &[&str]| p.extension().and_then(|e| e.to_str()).is_some_and(|e| kinds.contains(&e));
-    if files.iter().any(|p| kind(p, &[native::PROJECT_EXT])) {
+    let extension = |p: &PathBuf| p.extension().and_then(|e| e.to_str()).map(str::to_owned);
+    if files.iter().any(|p| extension(p).as_deref() == Some(native::PROJECT_EXT)) {
         return folder;
     }
-    match files.iter().filter(|p| kind(p, &[native::BOARD_EXT, "kicad_pcb", "brd"])).collect::<Vec<_>>().as_slice() {
+    // Our own board file goes by its exact extension, as file.open opens it; another program's
+    // board is told by its content, so its extension may come in any case (`Blinky.BRD`).
+    let board =
+        |p: &&PathBuf| extension(p).is_some_and(|e| e == native::BOARD_EXT || ["kicad_pcb", "brd"].contains(&e.to_ascii_lowercase().as_str()));
+    match files.iter().filter(board).collect::<Vec<_>>().as_slice() {
         [board] => (*board).clone(),
         _ => folder,
     }
@@ -1130,6 +1138,48 @@ mod tests {
     /// The same for the path a test expects.
     fn at(path: &str) -> Option<PathBuf> {
         Some(PathBuf::from(path))
+    }
+
+    /// Memory where another session gets in between: right after a folder is first found not to be
+    /// there, it makes that folder and puts a file of its own in it.
+    #[derive(Debug, Default)]
+    struct Racing {
+        memory: MemoryStorage,
+        raced: std::sync::atomic::AtomicBool,
+    }
+
+    impl circuitcraft_io::storage::Storage for Racing {
+        fn kind(&self, path: &Path) -> std::io::Result<Kind> {
+            let kind = self.memory.kind(path);
+            if kind.is_err() && !self.raced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.memory.write(&path.join("theirs"), b"theirs")?;
+            }
+            kind
+        }
+        fn read(&self, path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+            self.memory.read(path, limit)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.memory.write(path, bytes)
+        }
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.memory.remove(path)
+        }
+        fn create_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_folder(folder)
+        }
+        fn create_new_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_new_folder(folder)
+        }
+        fn files(&self, folder: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.memory.files(folder)
+        }
+        fn absolute(&self, path: &Path) -> std::io::Result<PathBuf> {
+            self.memory.absolute(path)
+        }
+        fn recovery_folder(&self) -> Option<PathBuf> {
+            None
+        }
     }
 
     /// A session on files in `memory`, which other sessions can share.
@@ -2126,6 +2176,21 @@ mod tests {
         };
         let single = unpack(&mut other, "z.zip", &json!(zipped_board), "/received/3").expect("zip");
         assert_eq!(path(&single["path"]), at("/received/3/z/Blinky.ccpcb"));
+        // Another program's board in a zip opens whatever the case of its extension; our own
+        // goes by its exact one, as file.open opens it.
+        for (name, found) in [("Blinky.BRD", true), ("Blinky.KICAD_PCB", true), ("Blinky.kicad_pcb", true), ("Blinky.CCPCB", false)] {
+            let files = MemoryStorage::default();
+            files.write(&Path::new("/z").join(name), b"board").expect("write");
+            let opened = to_open(&files, PathBuf::from("/z"));
+            assert_eq!(opened == Path::new("/z").join(name), found, "{name}");
+        }
+        // Another session makes the folder between the look and the making: the file is refused,
+        // and the other session's file stays as it was.
+        let racing = Arc::new(Racing::default());
+        let mut late = Session::with_storage(Box::new(racing.clone()));
+        let refused = unpack(&mut late, "theirs", &json!("bWluZQ=="), "/race");
+        assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("is there already")), "{refused:?}");
+        assert_eq!(racing.memory.read(Path::new("/race/theirs"), 10).expect("read"), b"theirs");
         // A file is never written over one that is there.
         memory.write(Path::new("/x/precious.ccpcb"), b"keep").expect("write");
         let mut on_memory = sharing(&memory);

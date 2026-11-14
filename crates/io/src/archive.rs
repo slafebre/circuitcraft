@@ -103,11 +103,17 @@ pub fn pack(storage: &dyn Storage, folder: &Path) -> Result<Vec<u8>, ArchiveErro
 /// (`__MACOSX`, names starting with a dot) are left out.
 ///
 /// Every file is read and checked before anything is written (at most [`MAX_UNPACKED`] bytes in
-/// memory), so a zip that is refused leaves nothing behind; if writing fails halfway, the files
-/// written are removed again (the folders made for them may stay).
+/// memory), so a zip refused for what it holds writes nothing. One refused while it is written
+/// (two names the system takes for one file, or a failed write) has the files it wrote removed
+/// again; the folder made for the zip, and folders in it, may stay.
 pub fn unpack(bytes: &[u8], storage: &dyn Storage, into: &Path) -> Result<PathBuf, ArchiveError> {
     if !new_folder_path(into) || storage.kind(into).is_ok() {
         return Err(ArchiveError::Exists(into.to_owned()));
+    }
+    // The zip reader lists every entry before it can be asked how many there are: refuse a zip
+    // with too many first, by the mark each entry of its directory starts with.
+    if central_entries(bytes) > MAX_FILES {
+        return Err(ArchiveError::TooLarge);
     }
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(malformed)?;
     if zip.len() > MAX_FILES {
@@ -135,16 +141,31 @@ pub fn unpack(bytes: &[u8], storage: &dyn Storage, into: &Path) -> Result<PathBu
         }
         files.push((path, contents));
     }
-    // A file can't also be a folder another file is in, and a name can't come twice.
-    let names: std::collections::BTreeSet<&Path> = files.iter().map(|(p, _)| p.as_path()).collect();
-    let clash = names.len() != files.len() || files.iter().any(|(p, _)| p.ancestors().skip(1).any(|a| names.contains(a)));
+    // A file can't also be a folder another file is in, and a name can't come twice. Names that
+    // differ only in case count as the same: on macOS and Windows they are one file.
+    let folded = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let names: std::collections::BTreeSet<PathBuf> = files.iter().map(|(p, _)| folded(p)).collect();
+    let clash = names.len() != files.len() || files.iter().any(|(p, _)| folded(p).ancestors().skip(1).any(|a| names.contains(a)));
     if clash {
-        return Err(ArchiveError::Malformed("a name in the zip is used twice, or for a file and a folder".to_owned()));
+        return Err(ArchiveError::Malformed("a name in the zip is used twice (whatever its case), or for a file and a folder".to_owned()));
     }
+    // Made in one step nobody can come between: two callers unpacking into the same new folder
+    // can't both write into it.
+    storage.create_new_folder(into).map_err(|source| match source.kind() {
+        std::io::ErrorKind::AlreadyExists => ArchiveError::Exists(into.to_owned()),
+        _ => ArchiveError::Io { path: into.to_owned(), source },
+    })?;
     let mut written: Vec<PathBuf> = Vec::with_capacity(files.len());
     for (path, contents) in &files {
         let target = into.join(path);
-        let wrote = target.parent().map_or(Ok(()), |parent| storage.create_folder(parent)).and_then(|()| storage.write(&target, contents));
+        // The folder is ours alone, so a file already at a name is one written here under a name
+        // the system takes for the same (`ß` and `SS` on macOS, `a.` and `a` on Windows): the
+        // second would replace the first.
+        let wrote = if storage.kind(&target).is_ok() {
+            Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "two names in the zip are one file here"))
+        } else {
+            target.parent().map_or(Ok(()), |parent| storage.create_folder(parent)).and_then(|()| storage.write(&target, contents))
+        };
         if let Err(source) = wrote {
             for done in &written {
                 let _ = storage.remove(done);
@@ -161,6 +182,13 @@ pub fn unpack(bytes: &[u8], storage: &dyn Storage, into: &Path) -> Result<PathBu
         Some(top) => into.join(top),
         None => into.to_owned(),
     })
+}
+
+/// How many entries a zip's directory has at most: the times the mark each entry starts with
+/// (`PK\x01\x02`) appears in it. A file's own bytes may hold the mark too, which only counts more.
+fn central_entries(bytes: &[u8]) -> usize {
+    // Counting stops one past the limit: that is enough to refuse.
+    bytes.windows(4).filter(|w| *w == b"PK\x01\x02").take(MAX_FILES + 1).count()
 }
 
 /// Whether `path` can name a new folder: a root or a drive, if any, and then plain names only,
@@ -202,7 +230,90 @@ fn inside(name: &str) -> Result<Option<PathBuf>, ArchiveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::MemoryStorage;
+    use crate::storage::{Kind, MemoryStorage};
+
+    /// Memory where another session gets in between: right after a folder is first found not to be
+    /// there, it makes that folder and puts a file of its own in it.
+    #[derive(Debug, Default)]
+    struct Racing {
+        memory: MemoryStorage,
+        raced: std::sync::atomic::AtomicBool,
+    }
+
+    impl Storage for Racing {
+        fn kind(&self, path: &Path) -> std::io::Result<Kind> {
+            let kind = self.memory.kind(path);
+            if kind.is_err() && !self.raced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.memory.write(&path.join("theirs"), b"theirs")?;
+            }
+            kind
+        }
+        fn read(&self, path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+            self.memory.read(path, limit)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.memory.write(path, bytes)
+        }
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.memory.remove(path)
+        }
+        fn create_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_folder(folder)
+        }
+        fn create_new_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.memory.create_new_folder(folder)
+        }
+        fn files(&self, folder: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.memory.files(folder)
+        }
+        fn absolute(&self, path: &Path) -> std::io::Result<PathBuf> {
+            self.memory.absolute(path)
+        }
+        fn recovery_folder(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    /// Memory that takes `ß` for `ss` and ignores case, as macOS does: names that are one file
+    /// there are one file here.
+    #[derive(Debug, Default)]
+    struct Alike(MemoryStorage);
+
+    impl Alike {
+        fn fold(path: &Path) -> PathBuf {
+            PathBuf::from(path.to_string_lossy().to_lowercase().replace('ß', "ss"))
+        }
+    }
+
+    impl Storage for Alike {
+        fn kind(&self, path: &Path) -> std::io::Result<Kind> {
+            self.0.kind(&Self::fold(path))
+        }
+        fn read(&self, path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+            self.0.read(&Self::fold(path), limit)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.write(&Self::fold(path), bytes)
+        }
+        fn remove(&self, path: &Path) -> std::io::Result<()> {
+            self.0.remove(&Self::fold(path))
+        }
+        fn create_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.0.create_folder(&Self::fold(folder))
+        }
+        fn create_new_folder(&self, folder: &Path) -> std::io::Result<()> {
+            self.0.create_new_folder(&Self::fold(folder))
+        }
+        fn files(&self, folder: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.0.files(&Self::fold(folder))
+        }
+        fn absolute(&self, path: &Path) -> std::io::Result<PathBuf> {
+            self.0.absolute(path)
+        }
+        fn recovery_folder(&self) -> Option<PathBuf> {
+            None
+        }
+    }
 
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -282,17 +393,6 @@ mod tests {
         }
         assert!(matches!(unpack(&lying_zip(u32::MAX), &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
         assert!(memory.snapshot().is_empty());
-        // Names deeper or longer than a project needs are refused before they cost anything.
-        let deep = format!("{}f", "a/".repeat(MAX_DEPTH));
-        let long = "a".repeat(MAX_NAME_BYTES + 1);
-        for name in [deep.as_str(), long.as_str()] {
-            assert!(matches!(unpack(&zip_of(&[(name, b"1")]), &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
-        }
-        assert!(unpack(&zip_of(&[(&format!("{}f", "a/".repeat(MAX_DEPTH - 1)), b"1")]), &MemoryStorage::default(), Path::new("/deep")).is_ok());
-        for into in ["", ".", "/", "nothere/..", "x/y/../.."] {
-            assert!(matches!(unpack(&zip_of(&[("f", b"1")]), &memory, Path::new(into)), Err(ArchiveError::Exists(_))), "{into:?}");
-        }
-        assert!(new_folder_path(Path::new("/received/1")) && new_folder_path(Path::new("received")));
         // A name for a file and for the folder of another (a name twice the zip reader refuses).
         let zipped = zip_of(&[("p/a", b"1"), ("p/a/b", b"2")]);
         assert!(matches!(unpack(&zipped, &memory, Path::new("/r")), Err(ArchiveError::Malformed(_))));
@@ -306,5 +406,42 @@ mod tests {
         assert!(small.len() < 10_000);
         assert!(unpack(&small, &memory, Path::new("/r")).is_ok());
         assert_eq!(memory.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn zips_that_would_cost_too_much_or_clash_are_refused_before_writing() {
+        let memory = MemoryStorage::default();
+        // Another session makes the folder between the look and the making: this unpack finds
+        // it made, writes nothing, and leaves the other session's file as it was.
+        let racing = Racing::default();
+        assert!(matches!(unpack(&zip_of(&[("theirs", b"mine")]), &racing, Path::new("/race")), Err(ArchiveError::Exists(_))));
+        assert_eq!(racing.memory.read(Path::new("/race/theirs"), 10).expect("read"), b"theirs");
+        // Two names the storage takes for one file, which lowercasing alone doesn't catch: the
+        // second is refused, and what the first wrote is removed.
+        let alike = Alike::default();
+        assert!(matches!(unpack(&zip_of(&[("p/straße", b"1"), ("p/STRASSE", b"2")]), &alike, Path::new("/u")), Err(ArchiveError::Io { .. })));
+        assert!(alike.0.snapshot().is_empty(), "nothing left but folders");
+        // Names deeper or longer than a project needs are refused before they cost anything.
+        let deep = format!("{}f", "a/".repeat(MAX_DEPTH));
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        for name in [deep.as_str(), long.as_str()] {
+            assert!(matches!(unpack(&zip_of(&[(name, b"1")]), &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
+        }
+        assert!(unpack(&zip_of(&[(&format!("{}f", "a/".repeat(MAX_DEPTH - 1)), b"1")]), &MemoryStorage::default(), Path::new("/deep")).is_ok());
+        for into in ["", ".", "/", "nothere/..", "x/y/../.."] {
+            assert!(matches!(unpack(&zip_of(&[("f", b"1")]), &memory, Path::new(into)), Err(ArchiveError::Exists(_))), "{into:?}");
+        }
+        assert!(new_folder_path(Path::new("/received/1")) && new_folder_path(Path::new("received")));
+        // Millions of directory entries are refused before the zip reader lists them.
+        let marks = b"PK\x01\x02".repeat(1_000_000);
+        let started = std::time::Instant::now();
+        assert!(matches!(unpack(&marks, &memory, Path::new("/r")), Err(ArchiveError::TooLarge)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Names that differ only in case are one file on macOS and Windows.
+        let cased = zip_of(&[("p/A.ccpcb", b"1"), ("p/a.ccpcb", b"2")]);
+        assert!(matches!(unpack(&cased, &memory, Path::new("/r")), Err(ArchiveError::Malformed(_))));
+        let folder_cased = zip_of(&[("p/A", b"1"), ("p/a/b", b"2")]);
+        assert!(matches!(unpack(&folder_cased, &memory, Path::new("/r")), Err(ArchiveError::Malformed(_))));
+        assert!(memory.snapshot().is_empty());
     }
 }

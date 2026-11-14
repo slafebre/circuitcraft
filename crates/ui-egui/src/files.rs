@@ -31,19 +31,21 @@ const RECEIVED: &str = "/received";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const PROJECTS: &str = "/projects";
 
-/// Files the browser's picker handed over (name and bytes), shared with the future that waits
-/// for the picker.
+/// Files the browser's picker handed over (name, and bytes or why they weren't read), shared
+/// with the future that waits for the picker.
 #[cfg(target_arch = "wasm32")]
-type Picked = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+type Picked = std::rc::Rc<std::cell::RefCell<Vec<(String, Result<Vec<u8>, String>)>>>;
 
-/// Files the browser's picker handed over, waiting for the next frame, and how many were taken
-/// in, so each goes into a folder of its own.
+/// Files the browser's picker handed over, waiting for the next frame, and how many files were
+/// taken in and projects saved, so each goes into a folder of its own.
 #[derive(Debug, Default)]
 pub(crate) struct Inbox {
     #[cfg(target_arch = "wasm32")]
     picked: Picked,
     #[cfg(target_arch = "wasm32")]
     taken: u64,
+    #[cfg(target_arch = "wasm32")]
+    saved: u64,
 }
 
 impl CircuitApp {
@@ -107,8 +109,11 @@ impl CircuitApp {
         let dialog = rfd::AsyncFileDialog::new().set_title("Open a board or a zipped project").add_filter("Boards and projects", &kinds);
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = dialog.pick_file().await {
-                let bytes = file.read().await;
-                inbox.borrow_mut().push((file.file_name(), bytes));
+                // Asked of the browser before anything is read: reading holds the whole file,
+                // and a file far too large would take the page's memory before it is refused.
+                let max = circuitcraft_io::native::MAX_FILE_BYTES;
+                let picked = if file.inner().size() > max as f64 { Err(format!("larger than {max} bytes")) } else { Ok(file.read().await) };
+                inbox.borrow_mut().push((file.file_name(), picked));
                 ctx.request_repaint();
             }
         });
@@ -117,8 +122,15 @@ impl CircuitApp {
     /// Takes in what the browser's picker handed over, and opens it.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn take_in_picked(&mut self) {
-        let picked: Vec<(String, Vec<u8>)> = std::mem::take(&mut *self.inbox.picked.borrow_mut());
+        let picked: Vec<(String, Result<Vec<u8>, String>)> = std::mem::take(&mut *self.inbox.picked.borrow_mut());
         for (name, bytes) in picked {
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(why) => {
+                    self.status = format!("{name}: {why}");
+                    continue;
+                }
+            };
             // Refused before it is copied: base64 and JSON would hold it several times over.
             if bytes.len() as u64 > circuitcraft_io::native::MAX_FILE_BYTES {
                 self.status = format!("{name}: larger than {} bytes", circuitcraft_io::native::MAX_FILE_BYTES);
@@ -136,12 +148,14 @@ impl CircuitApp {
         }
     }
 
-    /// Saves the board in the browser's memory as a project folder of its name, and offers it as
-    /// a zip to download.
+    /// Saves the board in the browser's memory as a new project, in a folder of its name inside
+    /// one of its own (two boards of one name never share a project), and offers it as a zip to
+    /// download.
     #[cfg(target_arch = "wasm32")]
     fn save_as_dialog(&mut self, ctx: &egui::Context) {
-        let folder = format!("{PROJECTS}/{}", safe_name(&self.session.board().name));
-        if self.run("file.save", &json!({ "path": folder, "overwrite": true })) {
+        self.inbox.saved += 1;
+        let folder = format!("{PROJECTS}/{}/{}", self.inbox.saved, safe_name(&self.session.board().name));
+        if self.run("file.save", &json!({ "path": folder })) {
             self.offer_download(ctx);
         }
     }
