@@ -18,6 +18,7 @@ circuitcraft-model = { workspace = true }
 circuitcraft-render = { workspace = true }
 circuitcraft-geom = { workspace = true }
 circuitcraft-units = { workspace = true }
+circuitcraft-mcp = { workspace = true }
 egui = { workspace = true }
 rfd = { workspace = true }
 serde_json = { workspace = true }

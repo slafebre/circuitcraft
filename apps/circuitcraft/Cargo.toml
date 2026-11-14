@@ -14,4 +14,5 @@ workspace = true
 [dependencies]
 circuitcraft-engine = { workspace = true }
 circuitcraft-ui-egui = { workspace = true }
+circuitcraft-mcp = { workspace = true }
 eframe = { workspace = true, features = ["wgpu", "accesskit", "default_fonts", "clipboard", "links", "wayland", "x11"] }

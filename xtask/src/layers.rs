@@ -44,7 +44,8 @@ pub const TABLE: &[(&str, Class)] = &[
 ];
 
 /// Allowed orderings within a layer: a crate may use crates earlier in its chain.
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["units", "geom"], &["rules", "library"], &["pour", "drc", "router"]];
+/// The UI uses `mcp` for the control channel, which speaks the MCP server's messages.
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["units", "geom"], &["rules", "library"], &["pour", "drc", "router"], &["mcp", "ui-egui"]];
 
 /// External crates that make up a UI toolkit or windowing system.
 pub const UI_CRATES: &[&str] = &["egui", "eframe", "egui-wgpu", "egui-winit", "egui_kittest", "wgpu", "winit", "rfd"];

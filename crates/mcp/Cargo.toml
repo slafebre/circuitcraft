@@ -13,5 +13,12 @@ workspace = true
 
 [dependencies]
 circuitcraft-engine = { workspace = true }
+circuitcraft-io = { workspace = true }
+getrandom = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+# The browser has no sockets, so the control channel never makes a token there; this only lets the
+# crate build, as the model's ids do, with random bits from the Web Crypto API.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
