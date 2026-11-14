@@ -12,6 +12,10 @@ use std::borrow::Cow;
 /// How deep elements may nest. EAGLE nests about ten deep.
 pub(crate) const MAX_DEPTH: usize = 64;
 
+/// The most attributes one element may have. EAGLE gives an element a dozen at most; the bound
+/// keeps looking one up cheap however a file pads an element out.
+pub(crate) const MAX_ATTRIBUTES: usize = 64;
+
 /// The most elements one document may hold.
 pub(crate) const MAX_ELEMENTS: usize = 4_000_000;
 
@@ -41,12 +45,13 @@ impl<'a> Element<'a> {
         self.children.iter().find(|c| c.name == name)
     }
 
-    /// How much the element holds: itself, its attributes, its text and everything under it,
-    /// with one more for every 64 bytes of an attribute's value or of text. What a reader makes
-    /// of an element each time it is used is in proportion to this.
+    /// How much the element holds: one for itself and for each element under it, and one more
+    /// for every 64 bytes of text or of an attribute's value. What a reader makes of an element
+    /// each time it is used is in proportion to this: a pad, a line or a corner each count as
+    /// one, however many short attributes describe them.
     pub(crate) fn weight(&self) -> usize {
-        let attributes = self.attributes.iter().map(|(_, value)| 1 + value.len() / 64).fold(0_usize, usize::saturating_add);
-        let own = 1_usize.saturating_add(attributes).saturating_add(self.text.len() / 64);
+        let values = self.attributes.iter().map(|(_, value)| value.len() / 64).fold(0_usize, usize::saturating_add);
+        let own = 1_usize.saturating_add(values).saturating_add(self.text.len() / 64);
         self.children.iter().map(Element::weight).fold(own, usize::saturating_add)
     }
 
@@ -158,6 +163,7 @@ impl<'a> Reader<'a> {
                     self.at += 1;
                     break;
                 }
+                Some(_) if element.attributes.len() >= MAX_ATTRIBUTES => return Err(self.error("an element has too many attributes to read")),
                 Some(_) => element.attributes.push(self.attribute()?),
                 None => return Err(self.error("an element is not closed")),
             }
@@ -271,10 +277,11 @@ mod tests {
         assert_eq!(drawing.child("note").map(|n| n.text.as_str()), Some("<raw> & text"));
         assert_eq!(drawing.all("layer").count(), 1);
         assert_eq!(parse("<a b=\"&quot;x&apos;\"/>").expect("parse").attr("b"), Some("\"x'"));
-        // An element weighs one, and one more for each attribute, child and 64 bytes of text.
-        assert_eq!((layer.weight(), text.weight(), drawing.weight()), (3, 3, 8));
-        let long = format!("<a b=\"{}\">{}</a>", "y".repeat(128), "x".repeat(640));
-        assert_eq!(parse(&long).expect("parse").weight(), 1 + (1 + 2) + 10);
+        // An element weighs one, and one more for each element under it and for each 64 bytes
+        // of text or of an attribute's value; short attributes weigh nothing.
+        assert_eq!((layer.weight(), text.weight(), drawing.weight()), (1, 1, 4));
+        let long = format!("<a b=\"{}\" c=\"1\">{}</a>", "y".repeat(128), "x".repeat(640));
+        assert_eq!(parse(&long).expect("parse").weight(), 1 + 2 + 10);
     }
 
     #[test]
@@ -313,5 +320,9 @@ mod tests {
         assert!(matches!(parse(&wide), Err(ImportError::Syntax { message, .. }) if message.contains("too many")));
         let many = format!("<a>{}</a>", "<b c=\"1\"/>".repeat(100_000));
         assert_eq!(parse(&many).map(|a| a.children.len()).ok(), Some(100_000));
+        // An element takes as many attributes as any real one has, and no more.
+        let attributes = |n: usize| format!("<a{}/>", (0..n).map(|i| format!(" a{i}=\"1\"")).collect::<String>());
+        assert!(parse(&attributes(MAX_ATTRIBUTES)).is_ok());
+        assert!(matches!(parse(&attributes(MAX_ATTRIBUTES + 1)), Err(ImportError::Syntax { message, .. }) if message.contains("attributes")));
     }
 }

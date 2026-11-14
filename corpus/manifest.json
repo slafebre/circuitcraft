@@ -76,7 +76,7 @@
       "commit": "deb38a377d50eadb04ddc7118a17a5ae58b1ee53",
       "path": "HARDWARE/ESP32-PoE-hardware-revision-L/ESP32-PoE_Rev_L.kicad_pcb",
       "sha256": "78bce8140fe7829d7c46c04cf5523d83ac61a5e8bf046e14d38140b1b99e6410",
-      "counts": { "copper": 4, "nets": 125, "footprints": 143, "pads": 498, "pads_reached": 446, "tracks": 2574, "vias": 221, "zones": 258, "keepouts": 21, "holes": 0, "texts": 45, "drawings": 7, "outline": true, "cutouts": 0 },
+      "counts": { "copper": 4, "nets": 125, "footprints": 143, "pads": 498, "pads_reached": 445, "tracks": 2574, "vias": 221, "zones": 258, "keepouts": 21, "holes": 0, "texts": 45, "drawings": 7, "outline": true, "cutouts": 0 },
       "render": null
     },
     {
@@ -102,7 +102,7 @@
       "commit": "acb9cd667ce608e7eb560a663938787343b424c4",
       "path": "bus_pirate_pcb/5-REV10A/REV10a.kicad_pcb",
       "sha256": "9b6ad556916bf5974da27bc6af76dca1cb4543e78071ba1d8403c60579a50030",
-      "counts": { "copper": 4, "nets": 198, "footprints": 220, "pads": 866, "pads_reached": 683, "tracks": 2417, "vias": 547, "zones": 15, "keepouts": 0, "holes": 0, "texts": 29, "drawings": 160, "outline": false, "cutouts": 0 },
+      "counts": { "copper": 4, "nets": 198, "footprints": 220, "pads": 866, "pads_reached": 679, "tracks": 2417, "vias": 547, "zones": 15, "keepouts": 0, "holes": 0, "texts": 29, "drawings": 160, "outline": false, "cutouts": 0 },
       "render": null
     },
     {
@@ -115,7 +115,7 @@
       "commit": "d8d0b2d71ab4cc4bcdb204a09f78be40d4c8cda3",
       "path": "jetson-nano-baseboard.kicad_pcb",
       "sha256": "8fc7b361091f1ab5b2026f65fc0c0ea42e16caa705cd52e63c3c48e6ba887252",
-      "counts": { "copper": 8, "nets": 488, "footprints": 391, "pads": 1528, "pads_reached": 1239, "tracks": 15624, "vias": 794, "zones": 47, "keepouts": 1, "holes": 0, "texts": 106, "drawings": 167, "outline": true, "cutouts": 0 },
+      "counts": { "copper": 8, "nets": 488, "footprints": 391, "pads": 1528, "pads_reached": 1231, "tracks": 15624, "vias": 794, "zones": 47, "keepouts": 1, "holes": 0, "texts": 106, "drawings": 167, "outline": true, "cutouts": 0 },
       "render": null
     }
   ]

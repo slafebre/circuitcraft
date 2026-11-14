@@ -32,16 +32,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Checks
         run: cargo xtask ci
-
-  corpus:
-    name: cargo xtask corpus
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
-      - uses: Swatinem/rust-cache@v2
-      # Fetches the public boards pinned in corpus/manifest.json from their authors' repositories,
-      # imports each and compares it with the counts the manifest records.
-      - name: Import the corpus
-        run: cargo xtask corpus

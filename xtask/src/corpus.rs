@@ -9,16 +9,26 @@
 //! The manifest also has a place for the checksum of each board's reviewed render; it stays
 //! empty until there is a renderer to make one.
 
-use circuitcraft_model::{Board, NetId, Pad, PadShape};
-use circuitcraft_units::Point;
+use circuitcraft_model::{Board, Footprint, LayerId, NetId, Pad, PadShape, Side};
+use circuitcraft_units::{Nm, Point};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The largest design file fetched or read.
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The largest manifest read, and the most boards it may list: far more than the corpus will
+/// ever hold, and small enough that a manifest gone wrong is refused before it is worked through.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_BOARDS: usize = 1_000;
+
+/// How long a fetch may take to connect, and to finish, in seconds: a server that accepts the
+/// connection and then sends nothing ends the fetch, not the patience of whoever runs it.
+const CONNECT_SECONDS: &str = "30";
+const FETCH_SECONDS: &str = "600";
 
 /// One board of the manifest.
 struct Entry {
@@ -40,7 +50,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Err(format!("unknown option `{unknown}`; usage: cargo xtask corpus [--offline] [board ...]"));
     }
     let manifest = root.join("corpus").join("manifest.json");
-    let text = std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let text = String::from_utf8(read(&manifest, MAX_MANIFEST_BYTES)?).map_err(|_| format!("{}: not UTF-8 text", manifest.display()))?;
     let entries = entries(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
     if let Some(missing) = only.iter().find(|name| !entries.iter().any(|e| e.name == ***name)) {
         return Err(format!("no board `{missing}` in the manifest"));
@@ -63,7 +73,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 fn entries(text: &str) -> Result<Vec<Entry>, String> {
     let manifest: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let boards = manifest.get("boards").and_then(Value::as_array).ok_or("no `boards` list")?;
+    if boards.len() > MAX_BOARDS {
+        return Err(format!("more than {MAX_BOARDS} boards"));
+    }
     let mut entries = Vec::with_capacity(boards.len());
+    let mut names = BTreeSet::new();
     for board in boards {
         let field = |name: &str| board.get(name).and_then(Value::as_str).map(str::to_owned).ok_or(format!("a board without `{name}`"));
         let entry = Entry {
@@ -88,7 +102,7 @@ fn entries(text: &str) -> Result<Vec<Entry>, String> {
         if !plain(&entry.name, "-") || !repo_ok || !hex(&entry.commit, 40) || !hex(&entry.sha256, 64) || !path_ok || !format_ok {
             return Err(format!("board `{}`: a name, repository, commit, path, checksum or format is not in the form the manifest uses", entry.name));
         }
-        if entries.iter().any(|e: &Entry| e.name == entry.name) {
+        if !names.insert(entry.name.clone()) {
             return Err(format!("board `{}` is listed twice", entry.name));
         }
         entries.push(entry);
@@ -105,7 +119,7 @@ fn check(root: &Path, entry: &Entry, offline: bool) -> Result<Map<String, Value>
         }
         fetch(entry, &file)?;
     }
-    let bytes = read(&file)?;
+    let bytes = read(&file, MAX_BYTES)?;
     let found = hex(&Sha256::digest(&bytes));
     if found != entry.sha256 {
         return Err(format!("checksum {found}, expected {}; delete {} to fetch it again", entry.sha256, file.display()));
@@ -135,7 +149,8 @@ fn fetch(entry: &Entry, file: &Path) -> Result<(), String> {
     let part = file.with_extension("part");
     let status = Command::new("curl")
         // No redirects: the file is where the manifest says, or the fetch fails.
-        .args(["--fail", "--silent", "--show-error", "--proto", "=https", "--max-filesize", &MAX_BYTES.to_string(), "--output"])
+        .args(["--fail", "--silent", "--show-error", "--proto", "=https", "--connect-timeout", CONNECT_SECONDS, "--max-time", FETCH_SECONDS])
+        .args(["--max-filesize", &MAX_BYTES.to_string(), "--output"])
         .arg(&part)
         .arg(&url)
         .status()
@@ -152,10 +167,11 @@ fn percent_encoded(path: &str) -> String {
     path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-fn read(file: &Path) -> Result<Vec<u8>, String> {
+/// A whole file of at most `limit` bytes; a larger one is refused before it is read.
+fn read(file: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let size = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?.len();
-    if size > MAX_BYTES {
-        return Err(format!("{}: larger than {MAX_BYTES} bytes", file.display()));
+    if size > limit {
+        return Err(format!("{}: larger than {limit} bytes", file.display()));
     }
     std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))
 }
@@ -185,43 +201,78 @@ fn counts(board: &Board) -> Map<String, Value> {
     counts.as_object().cloned().unwrap_or_default()
 }
 
-/// How many pads have a track end or a via of their own net on them. Every other count stays the
-/// same when footprints are placed turned or mirrored the wrong way; this one drops to almost
-/// nothing.
+/// A track end or a via: where it is, and the copper layers it is on, as places in the stack
+/// counted from the top, first and last.
+struct End {
+    at: Point,
+    layers: (usize, usize),
+}
+
+/// How many pads have a track end or a via of their own net on their copper: on a layer where
+/// the pad has copper, and within the copper's shape there. Every other count stays the same
+/// when footprints are placed turned or mirrored the wrong way, or their pads land on the wrong
+/// layer; this one drops.
 fn pads_reached(board: &Board) -> usize {
-    let mut ends: BTreeMap<NetId, Vec<Point>> = BTreeMap::new();
+    let copper: Vec<LayerId> = board.stack.copper().map(|l| l.id).collect();
+    let place = |id: LayerId| copper.iter().position(|c| *c == id);
+    let mut ends: BTreeMap<NetId, Vec<End>> = BTreeMap::new();
     for track in board.tracks.iter() {
-        if let Some(net) = track.net {
+        if let (Some(net), Some(layer)) = (track.net, place(track.layer)) {
             let (from, to) = track.path.ends();
-            ends.entry(net).or_default().extend([from, to]);
+            ends.entry(net).or_default().extend([from, to].map(|at| End { at, layers: (layer, layer) }));
         }
     }
     for via in board.vias.iter() {
-        if let Some(net) = via.net {
-            ends.entry(net).or_default().push(via.position);
+        if let (Some(net), Some(from), Some(to)) = (via.net, place(via.from), place(via.to)) {
+            ends.entry(net).or_default().push(End { at: via.position, layers: (from.min(to), from.max(to)) });
         }
     }
-    let reached = |at: Point, pad: &Pad| {
-        let reach = reach(pad);
-        let on = |end: &Point| (end.x.0 - at.x.0).abs() <= reach && (end.y.0 - at.y.0).abs() <= reach;
-        pad.net.and_then(|net| ends.get(&net)).is_some_and(|ends| ends.iter().any(on))
-    };
-    board.footprints.iter().flat_map(|f| f.pads.iter().filter(move |pad| f.to_board(pad.position).is_some_and(|at| reached(at, pad)))).count()
+    let bottom = copper.len().saturating_sub(1);
+    let reached =
+        |f: &Footprint, pad: &Pad| pad.net.and_then(|net| ends.get(&net)).is_some_and(|ends| ends.iter().any(|end| on_copper(f, pad, end, bottom)));
+    board.footprints.iter().map(|f| f.pads.iter().filter(|pad| reached(f, pad)).count()).sum()
 }
 
-/// How far from its middle a pad's copper goes at most: half its larger side.
-fn reach(pad: &Pad) -> i64 {
-    let shape = pad.front.as_ref().or(pad.back.as_ref()).map(|face| &face.shape).or(pad.inner.as_ref());
+/// Whether `end` is on the copper of `pad`, on a board whose last copper layer is at `bottom`.
+fn on_copper(footprint: &Footprint, pad: &Pad, end: &End, bottom: usize) -> bool {
+    // The end as the copper sees it: in the footprint, with the pad's turn undone, from the
+    // middle of the copper.
+    let Some(local) = footprint.to_footprint(end.at) else { return false };
+    let from_pad = Point::new(Nm(local.x.0.saturating_sub(pad.position.x.0)), Nm(local.y.0.saturating_sub(pad.position.y.0)));
+    let Some(unturned) = pad.rotation.reversed().turn(from_pad) else { return false };
+    let (x, y) = (unturned.x.0.saturating_sub(pad.copper_offset.x.0), unturned.y.0.saturating_sub(pad.copper_offset.y.0));
+    // The pad's own side is the top of the stack for a footprint on the top.
+    let (own, other) = if footprint.side == Side::Top { (0, bottom) } else { (bottom, 0) };
+    let faces = [
+        (pad.front.as_ref().map(|face| &face.shape), own, own),
+        (pad.back.as_ref().map(|face| &face.shape), other, other),
+        (pad.inner.as_ref(), 1, bottom.saturating_sub(1)),
+    ];
+    faces.into_iter().any(|(shape, first, last)| {
+        let on_layer = first <= last && first <= end.layers.1 && end.layers.0 <= last;
+        on_layer && shape.is_some_and(|shape| within(shape, x, y))
+    })
+}
+
+/// Whether the point `(x, y)`, measured from a copper shape's middle, is on the shape. Rounded
+/// corners are counted as square, and a custom shape as the box around it: the check is for
+/// pads put in the wrong place, not for the last few micrometres of a corner.
+fn within(shape: &PadShape, x: i64, y: i64) -> bool {
+    let boxed = |half_width: i64, half_height: i64| x.abs() <= half_width && y.abs() <= half_height;
     match shape {
-        Some(PadShape::Circle { diameter }) => diameter.0 / 2,
-        Some(PadShape::Rect { width, height } | PadShape::RoundRect { width, height, .. } | PadShape::Oval { width, height }) => {
-            width.0.max(height.0) / 2
+        PadShape::Circle { diameter } => {
+            let (x, y, r) = (i128::from(x), i128::from(y), i128::from(diameter.0 / 2));
+            x * x + y * y <= r * r
         }
-        Some(PadShape::Custom { outline }) => {
-            let corners = std::iter::once(outline.start).chain(outline.edges.iter().map(circuitcraft_geom::Edge::end));
-            corners.map(|p| p.x.0.abs().max(p.y.0.abs())).max().unwrap_or(0)
+        PadShape::Rect { width, height } | PadShape::RoundRect { width, height, .. } | PadShape::Oval { width, height } => {
+            boxed(width.0 / 2, height.0 / 2)
         }
-        None => pad.hole.map_or(0, |hole| hole.diameter.0 / 2),
+        PadShape::Custom { outline } => {
+            let corners: Vec<Point> = std::iter::once(outline.start).chain(outline.edges.iter().map(circuitcraft_geom::Edge::end)).collect();
+            // Between the lowest and the highest corner, along one axis.
+            let spanned = |v: i64, of: fn(&Point) -> i64| corners.iter().map(of).min() <= Some(v) && Some(v) <= corners.iter().map(of).max();
+            spanned(x, |p| p.x.0) && spanned(y, |p| p.y.0)
+        }
     }
 }
 
@@ -286,6 +337,83 @@ mod tests {
         let twice = GOOD.replacen("]}", ", {\"name\": \"demo-board\", \"repo\": \"a/b\", \"commit\": \"0123456789abcdef0123456789abcdef01234567\", \"path\": \"x\", \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\", \"format\": \"kicad\"}]}", 1);
         assert!(entries(&twice).is_err_and(|e| e.contains("twice")));
         assert!(entries("{}").is_err() && entries("[").is_err());
+        // A manifest with more boards than the corpus could hold is refused before any is read.
+        let crowded = format!("{{\"boards\": [{}]}}", vec!["{}"; MAX_BOARDS + 1].join(","));
+        assert!(entries(&crowded).is_err_and(|e| e.contains("more than")));
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        assert!(read(&missing, 10).is_err_and(|e| e.contains("larger than 10 bytes")));
+        assert!(read(&missing, MAX_MANIFEST_BYTES).is_ok());
+    }
+
+    /// A footprint at (10, 10) mm, turned 20 degrees, on `side`.
+    fn footprint(side: Side) -> Footprint {
+        use circuitcraft_model::{Assembly, ItemId, Mounting, Rotation};
+        Footprint {
+            id: ItemId::from_u128(1),
+            reference: "U1".to_owned(),
+            value: String::new(),
+            link: None,
+            assembly: Assembly { mounting: Mounting::Other, in_bom: true, in_placement: true, fitted: true },
+            position: Point::new(Nm(10_000_000), Nm(10_000_000)),
+            rotation: Rotation(20_000),
+            side,
+            pads: Vec::new(),
+            graphics: Vec::new(),
+            texts: Vec::new(),
+        }
+    }
+
+    /// Where the point `(x, y)` micrometres of a pad's copper is on the board, worked out the way
+    /// the model defines it: from the copper's middle, turned with the pad, placed in the
+    /// footprint, and put on the board by the footprint.
+    fn on_board(footprint: &Footprint, pad: &Pad, x: i64, y: i64) -> Point {
+        let in_pad = Point::new(Nm(x * 1_000 + pad.copper_offset.x.0), Nm(y * 1_000 + pad.copper_offset.y.0));
+        let turned = pad.rotation.turn(in_pad).expect("in range");
+        footprint.to_board(Point::new(Nm(turned.x.0 + pad.position.x.0), Nm(turned.y.0 + pad.position.y.0))).expect("in range")
+    }
+
+    #[test]
+    fn an_end_is_on_a_pad_when_it_is_on_its_copper_on_a_layer_that_has_some() {
+        use circuitcraft_model::{Hole, Rotation};
+        let mm = |x: i64, y: i64| Point::new(Nm(x * 1_000_000), Nm(y * 1_000_000));
+        let thin = PadShape::Rect { width: Nm(2_000_000), height: Nm(200_000) };
+        // A drilled pad on a four-layer board: thin copper, turned 30 degrees against its
+        // footprint and sitting off its hole, in a footprint on the bottom turned 20 degrees.
+        let bottom = footprint(Side::Bottom);
+        let mut drilled = Pad::through_hole("1", mm(3, -2), thin.clone(), Hole::round(Nm(100_000), true));
+        (drilled.rotation, drilled.copper_offset) = (Rotation(30_000), Point::new(Nm(500_000), Nm(300_000)));
+        let at = |x: i64, y: i64, layers: (usize, usize)| on_copper(&bottom, &drilled, &End { at: on_board(&bottom, &drilled, x, y), layers }, 3);
+        // On the copper along its length, on every layer; off it across its width, on none.
+        for layer in 0..4 {
+            assert!(at(900, 0, (layer, layer)) && at(-900, 90, (layer, layer)), "layer {layer}");
+            assert!(!at(0, 900, (layer, layer)) && !at(900, 110, (layer, layer)) && !at(1_010, 0, (layer, layer)), "layer {layer}");
+        }
+        // The same on the top side.
+        let top = footprint(Side::Top);
+        assert!(on_copper(&top, &drilled, &End { at: on_board(&top, &drilled, 900, 90), layers: (0, 0) }, 3));
+        assert!(!on_copper(&top, &drilled, &End { at: on_board(&top, &drilled, 900, 110), layers: (0, 0) }, 3));
+        // A surface pad has copper on its footprint's own side only: the last layer for a
+        // footprint on the bottom. A via reaches it when its span comes down to that layer.
+        let mut surface = Pad::smd("2", mm(3, -2), thin.clone());
+        surface.rotation = Rotation(30_000);
+        let on = |pad: &Pad, layers: (usize, usize), last: usize| on_copper(&bottom, pad, &End { at: on_board(&bottom, pad, 900, 0), layers }, last);
+        assert_eq!([(3, 3), (0, 0), (1, 2), (0, 3), (1, 3), (0, 2)].map(|layers| on(&surface, layers, 3)), [true, false, false, true, true, false]);
+        assert!(on_copper(&top, &surface, &End { at: on_board(&top, &surface, 900, 0), layers: (0, 0) }, 3));
+        assert!(!on_copper(&top, &surface, &End { at: on_board(&top, &surface, 900, 0), layers: (3, 3) }, 3));
+        // Copper on the inner layers alone is reached there, and nowhere on a board without them.
+        let buried = Pad { front: None, back: None, ..drilled.clone() };
+        assert_eq!([(0, 0), (1, 1), (2, 2), (3, 3), (0, 3)].map(|layers| on(&buried, layers, 3)), [false, true, true, false, true]);
+        assert_eq!([(0, 0), (1, 1), (0, 1)].map(|layers| on(&buried, layers, 1)), [false; 3]);
+        // A shape of its own counts as the box around it; a round one as its circle.
+        let triangle = circuitcraft_geom::Contour::polyline(&[mm(-1, -1), mm(1, -1), mm(0, 1)]).expect("triangle");
+        let custom = Pad::smd("3", mm(0, 0), PadShape::Custom { outline: triangle });
+        let round = Pad::smd("4", mm(0, 0), PadShape::Circle { diameter: Nm(1_000_000) });
+        let inside = |pad: &Pad, x: i64, y: i64| on_copper(&bottom, pad, &End { at: on_board(&bottom, pad, x, y), layers: (3, 3) }, 3);
+        assert_eq!(
+            [inside(&custom, 900, -900), inside(&custom, -990, 990), inside(&custom, 1_100, 0), inside(&custom, 0, -1_100)],
+            [true, true, false, false]
+        );
+        assert_eq!([inside(&round, 300, 300), inside(&round, 0, 490), inside(&round, 450, 450), inside(&round, 510, 0)], [true, true, false, false]);
     }
 
     #[test]
@@ -299,19 +427,45 @@ mod tests {
         expected.remove("vias");
         assert_eq!(differences(&expected, &found), "tracks 0 (expected 5), vias 0 (expected null)");
         assert_eq!(differences(&found, &found), "");
-        // A pad is reached when a track of its own net ends on it, wherever its footprint puts it.
-        let text = "(kicad_pcb (version 20221018) (net 1 \"A\") (net 2 \"B\")
+        // A pad is reached when a track of its own net ends on its copper, wherever its
+        // footprint puts it.
+        let text = "(kicad_pcb (version 20221018) (net 1 \"A\") (net 2 \"B\") (net 3 \"C\") (net 4 \"D\")
   (footprint \"a:b\" (layer \"B.Cu\") (at 10 10 90)
     (pad \"1\" smd rect (at 1 2 90) (size 1 1) (layers \"B.Cu\") (net 1 \"A\"))
     (pad \"2\" smd rect (at -1 2 90) (size 1 1) (layers \"B.Cu\") (net 2 \"B\"))
     (pad \"3\" smd rect (at 5 5 90) (size 1 1) (layers \"B.Cu\")))
+  (footprint \"a:c\" (layer \"F.Cu\") (at 40 10 90)
+    (pad \"1\" smd rect (at 0 0 90) (size 2 0.2) (layers \"F.Cu\") (net 3 \"C\"))
+    (pad \"2\" smd circle (at 5 0 90) (size 1 1) (layers \"F.Cu\") (net 4 \"D\")))
   (segment (start 0 0) (end 12.4 9) (width 0.2) (layer \"B.Cu\") (net 1))
   (segment (start 0 0) (end 12 11) (width 0.2) (layer \"B.Cu\") (net 1))
-  (via (at 30 30) (size 0.8) (drill 0.4) (layers \"F.Cu\" \"B.Cu\") (net 2)))";
-        let board = circuitcraft_io::import_board(text, "x").expect("import").board;
-        // Pad 1 is at (12, 9) on the board, half a millimetre across: the first track ends on
-        // it. The second ends where pad 2 is, on another net; pad 2's own via is far away.
-        assert_eq!((counts(&board).get("pads"), counts(&board).get("pads_reached")), (Some(&json!(3)), Some(&json!(1))));
+  (via (at 30 30) (size 0.8) (drill 0.4) (layers \"F.Cu\" \"B.Cu\") (net 2))
+  (segment (start 0 0) (end 40.9 10) (width 0.2) (layer \"F.Cu\") (net 3))
+  (segment (start 0 0) (end 40 5) (width 0.2) (layer \"B.Cu\") (net 4)))";
+        let reached = |text: &str| {
+            let board = circuitcraft_io::import_board(text, "x").expect("import").board;
+            (counts(&board).get("pads").cloned(), counts(&board).get("pads_reached").cloned())
+        };
+        // Pad 1 of the first footprint is at (12, 9) on the board, a millimetre square: the first
+        // track ends on it. The second ends where pad 2 is, on another net; pad 2's own via is
+        // far away. In the second footprint, the long thin pad stands upright at (40, 10) and a
+        // track ends 0.9 mm to its side, off its copper; the round pad at (40, 5) is on the top
+        // and a track of its net ends right under it, on the bottom.
+        assert_eq!(reached(text), (Some(json!(5)), Some(json!(1))));
+        // Pad 2 of the first footprint is on the bottom; its net's via, moved onto it, reaches it
+        // at the lower end of its span.
+        assert_eq!(reached(&text.replace("(via (at 30 30)", "(via (at 12 11)")).1, Some(json!(2)));
+        // The same track ending 0.9 mm along the thin pad is on it, and a via under the round pad
+        // reaches it from either side.
+        let along = text.replace("(end 40.9 10)", "(end 40 10.9)");
+        assert_eq!(reached(&along).1, Some(json!(2)));
+        let joined = along.replace(
+            "(segment (start 0 0) (end 40 5) (width 0.2) (layer \"B.Cu\") (net 4))",
+            "(via (at 40.3 5.3) (size 0.8) (drill 0.4) (layers \"F.Cu\" \"B.Cu\") (net 4))",
+        );
+        assert_eq!(reached(&joined).1, Some(json!(3)));
+        // Outside the round pad's circle, though inside the square around it.
+        assert_eq!(reached(&joined.replace("(via (at 40.3 5.3)", "(via (at 40.45 5.45)")).1, Some(json!(2)));
         assert_eq!(hex(&Sha256::digest(b"")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 

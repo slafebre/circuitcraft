@@ -38,10 +38,10 @@ mod number {
 }
 
 /// The most the elements of one board may place. Every element gets a copy of its package, so a
-/// small file can name a large package many times; each copy is weighed by everything the package
-/// holds (its pads, drawings and texts, their attributes and every corner of its polygons), and
-/// this bounds what the copies add up to. Via keepouts, copied to every copper layer, count the
-/// same way.
+/// small file can name a large package many times; each copy is weighed by what the board gets
+/// from it (one for each pad, drawing and text and for each corner of a polygon, and more for long
+/// names and text), and this bounds what the copies add up to. Via keepouts, copied to every
+/// copper layer, count the same way. A board of ten thousand parts uses a fifth of it.
 const MAX_PLACED: usize = 1_000_000;
 
 /// Reads an EAGLE board. `name` becomes the board's name (a file has none of its own).
@@ -719,6 +719,11 @@ impl<'a> Eagle<'a> {
             }
             _ => PadShape::Circle { diameter },
         };
+        // A shape with corners of its own is held three times, on the front, inside and on the
+        // back: its corners count against what the elements may place, as a polygon's do.
+        if let PadShape::Custom { outline } = &shape {
+            self.placed = self.placed.saturating_add(outline.edges.len().saturating_mul(3));
+        }
         let mut pad = Pad::through_hole(&pad_name(part)?, point(part, "x", "y")?, shape, Hole::round(drill, true));
         pad.rotation = import::degrees(rot(part).0).ok()?;
         pad.copper_offset = offset;
@@ -1224,14 +1229,14 @@ pub(crate) mod tests {
             )
         };
         let refused = |text: &str| matches!(read_board(text, "x"), Err(ImportError::Unsupported(why)) if why.contains("1000000"));
-        // A package of 998 parts weighs a thousand with itself and its name: a thousand copies
-        // fit, one more does not.
-        let parts = "<description/>".repeat(998);
+        // A package of 999 parts weighs a thousand with itself: a thousand copies fit, one more
+        // does not.
+        let parts = "<description/>".repeat(999);
         assert_eq!(read_board(&board(&parts, 1_000), "x").map(|read| read.board.footprints.len()), Ok(1_000));
         assert!(refused(&board(&parts, 1_001)));
-        // One polygon is one part, and every corner of it counts, with its two coordinates:
-        // 1,665 corners make the package weigh 5,000.
-        let polygon = format!("<polygon width=\"0\" layer=\"21\">{}</polygon>", "<vertex x=\"0\" y=\"0\"/>".repeat(1_665));
+        // One polygon is one part, and every corner of it counts: 4,998 corners make the
+        // package weigh 5,000.
+        let polygon = format!("<polygon width=\"0\" layer=\"21\">{}</polygon>", "<vertex x=\"0\" y=\"0\"/>".repeat(4_998));
         assert!(read_board(&board(&polygon, 200), "x").is_ok());
         assert!(refused(&board(&polygon, 201)));
         // Vias kept out of a shape are kept out on every copper layer: those copies count too.
@@ -1267,13 +1272,52 @@ pub(crate) mod tests {
         );
         // And a long name weighs, like long text: 64,000 characters make a part a thousand heavier.
         assert!(refused(&board(&format!("<smd name=\"{}\" x=\"0\" y=\"0\" dx=\"1\" dy=\"1\" layer=\"1\"/>", "n".repeat(64_000)), 1_000)));
-        // Attributes and text weigh too: a part with 997 of them, or with a long text, makes the
-        // package as heavy as a thousand parts.
-        let junk: String = (0..997).map(|i| format!(" a{i}=\"1\"")).collect();
-        let attributes = format!("<description{junk}/>");
-        assert!(read_board(&board(&attributes, 1_000), "x").is_ok() && refused(&board(&attributes, 1_001)));
-        let wordy = format!("<description>{}</description>", "x".repeat(64 * 997));
+        let wordy = format!("<description>{}</description>", "x".repeat(64 * 998));
         assert!(read_board(&board(&wordy, 1_000), "x").is_ok() && refused(&board(&wordy, 1_001)));
+        // An octagon pad holds its seven edges three times over: 999 of them make a copy of
+        // the package weigh 1,000 + 999 × 21.
+        let octagons: String =
+            (0..999).map(|n| format!("<pad name=\"{n}\" x=\"0\" y=\"0\" drill=\"1\" diameter=\"2\" shape=\"octagon\"/>")).collect();
+        assert_eq!(read_board(&board(&octagons, 45), "x").map(|read| read.board.footprints.len()), Ok(45));
+        assert!(refused(&board(&octagons, 46)));
+        // Short attributes weigh nothing, however many a part has: what counts is what the
+        // board gets.
+        let junk: String = (0..60).map(|i| format!(" a{i}=\"1\"")).collect();
+        assert!(read_board(&board(&format!("<description{junk}/>"), 100_000), "x").is_ok());
+    }
+
+    #[test]
+    fn a_large_board_of_ordinary_parts_is_within_what_elements_may_place() {
+        // Four hundred 256-pad arrays and ten thousand two-pad parts with their outlines and
+        // names, each pad and line written with every attribute a file gives one: far more
+        // than any board in the corpus, and a quarter of what a board may place.
+        let pad = |n: usize| {
+            format!(
+                "<smd name=\"{n}\" x=\"{}\" y=\"{}\" dx=\"0.4\" dy=\"0.4\" layer=\"1\" roundness=\"100\" rot=\"R0\" stop=\"yes\" thermals=\"yes\" cream=\"yes\"/>",
+                n % 16,
+                n / 16
+            )
+        };
+        let array: String = (0..256).map(pad).collect();
+        let line = "<wire x1=\"-1\" y1=\"0.5\" x2=\"1\" y2=\"0.5\" width=\"0.127\" layer=\"21\" style=\"continuous\" curve=\"0\" cap=\"round\"/>";
+        let chip = format!(
+            "{}{}{}<text x=\"0\" y=\"1\" size=\"1\" layer=\"25\">&gt;NAME</text><text x=\"0\" y=\"-1\" size=\"1\" layer=\"27\">&gt;VALUE</text>",
+            pad(1),
+            pad(2),
+            line.repeat(6)
+        );
+        let place = |name: &str, package: &str, n: usize| {
+            format!("<element name=\"{name}{n}\" library=\"l\" package=\"{package}\" value=\"v\" x=\"{}\" y=\"{}\" rot=\"R90\"/>", n % 100, n / 100)
+        };
+        let elements: String = (0..400).map(|n| place("U", "array", n)).chain((0..10_000).map(|n| place("R", "chip", n))).collect();
+        let text = format!(
+            "<eagle version=\"9\"><drawing><board><libraries><library name=\"l\"><packages><package name=\"array\">{array}</package><package name=\"chip\">{chip}</package>\
+             </packages></library></libraries><elements>{elements}</elements></board></drawing></eagle>"
+        );
+        let read = read_board(&text, "x").expect("a large board imports");
+        assert_eq!(read.board.footprints.len(), 10_400);
+        assert_eq!(read.board.footprints.iter().map(|f| f.pads.len()).sum::<usize>(), 400 * 256 + 10_000 * 2);
+        assert!(read.notes.is_empty(), "{:?}", read.notes.lines());
     }
 
     /// A board where nothing lines up with anything: an element mirrored and turned, pads turned
