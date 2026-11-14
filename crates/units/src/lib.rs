@@ -107,11 +107,25 @@ impl Point {
     pub fn from_mm(x: f64, y: f64) -> Result<Point, UnitError> {
         Ok(Point { x: Nm::from_mm(x)?, y: Nm::from_mm(y)? })
     }
+
+    /// This point moved by `by` (both coordinates added), or `None` when a coordinate would
+    /// leave the range of an `i64`.
+    pub fn shifted(self, by: Point) -> Option<Point> {
+        Some(Point { x: Nm(self.x.0.checked_add(by.x.0)?), y: Nm(self.y.0.checked_add(by.y.0)?) })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn points_shift_without_wrapping() {
+        let p = |x: i64, y: i64| Point::new(Nm(x), Nm(y));
+        assert_eq!(p(1, -2).shifted(p(10, 20)), Some(p(11, 18)));
+        assert_eq!(p(i64::MAX, 0).shifted(p(1, 0)), None);
+        assert_eq!(p(0, i64::MIN).shifted(p(0, -1)), None);
+    }
 
     #[test]
     fn mm_and_mil_round_trip() {
