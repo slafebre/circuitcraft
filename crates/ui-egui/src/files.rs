@@ -26,7 +26,6 @@ pub(crate) enum FileAction {
 const OPENABLE: &[&str] = &["ccproj", "ccpcb", "kicad_pcb", "brd"];
 
 /// Where the browser keeps what it was handed, and where it saves projects, in its memory.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const RECEIVED: &str = "/received";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const PROJECTS: &str = "/projects";
@@ -42,10 +41,28 @@ type Picked = std::rc::Rc<std::cell::RefCell<Vec<(String, Result<Vec<u8>, String
 pub(crate) struct Inbox {
     #[cfg(target_arch = "wasm32")]
     picked: Picked,
-    #[cfg(target_arch = "wasm32")]
     taken: u64,
     #[cfg(target_arch = "wasm32")]
     saved: u64,
+}
+
+/// What a picked file holds, read only if the browser says it is no larger than a file may be:
+/// reading holds the whole file, and one far too large would take the page's memory before it
+/// is refused. `size` is what the browser reports; `read` reads the file.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) async fn picked_contents<F, R>(size: f64, read: F) -> Result<Vec<u8>, String>
+where
+    F: FnOnce() -> R,
+    R: std::future::Future<Output = Vec<u8>>,
+{
+    let max = circuitcraft_io::native::MAX_FILE_BYTES;
+    if size.is_nan() {
+        return Err("the browser gave no size for it".to_owned());
+    }
+    if size > max as f64 {
+        return Err(format!("larger than {max} bytes"));
+    }
+    Ok(read().await)
 }
 
 impl CircuitApp {
@@ -109,10 +126,7 @@ impl CircuitApp {
         let dialog = rfd::AsyncFileDialog::new().set_title("Open a board or a zipped project").add_filter("Boards and projects", &kinds);
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(file) = dialog.pick_file().await {
-                // Asked of the browser before anything is read: reading holds the whole file,
-                // and a file far too large would take the page's memory before it is refused.
-                let max = circuitcraft_io::native::MAX_FILE_BYTES;
-                let picked = if file.inner().size() > max as f64 { Err(format!("larger than {max} bytes")) } else { Ok(file.read().await) };
+                let picked = picked_contents(file.inner().size(), || file.read()).await;
                 inbox.borrow_mut().push((file.file_name(), picked));
                 ctx.request_repaint();
             }
@@ -123,6 +137,13 @@ impl CircuitApp {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn take_in_picked(&mut self) {
         let picked: Vec<(String, Result<Vec<u8>, String>)> = std::mem::take(&mut *self.inbox.picked.borrow_mut());
+        self.take_in(picked);
+    }
+
+    /// Takes in picked files, each into a folder of its own, and opens them; a file that wasn't
+    /// read says why in the status bar.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn take_in(&mut self, picked: Vec<(String, Result<Vec<u8>, String>)>) {
         for (name, bytes) in picked {
             let bytes = match bytes {
                 Ok(bytes) => bytes,
@@ -199,6 +220,36 @@ fn safe_name(name: &str) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Runs a future that never waits to the end.
+    fn finished<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("the future waited"),
+        }
+    }
+
+    #[test]
+    fn a_picked_file_too_large_is_refused_without_being_read() {
+        let max = circuitcraft_io::native::MAX_FILE_BYTES as f64;
+        let never = || async { panic!("a file too large was read") };
+        assert_eq!(finished(picked_contents(max + 1.0, never)), Err(format!("larger than {max} bytes")));
+        assert_eq!(finished(picked_contents(f64::NAN, never)), Err("the browser gave no size for it".to_owned()));
+        assert_eq!(finished(picked_contents(max, || async { b"board".to_vec() })), Ok(b"board".to_vec()));
+        // Taken in, the refusal reaches the status bar and nothing is written or opened.
+        let mut app = CircuitApp::new(circuitcraft_engine::Session::in_memory());
+        let refused = finished(picked_contents(max + 1.0, never));
+        app.take_in(vec![("huge.zip".to_owned(), refused)]);
+        assert_eq!(app.status, format!("huge.zip: larger than {max} bytes"));
+        assert!(app.session.storage().kind(Path::new(RECEIVED)).is_err(), "nothing taken in");
+        // A file that was read is taken into a folder of its own and opened.
+        let board = r#"<eagle version="9"><drawing><board><signals><signal name="GND"/></signals></board></drawing></eagle>"#;
+        app.take_in(vec![("Blinky.brd".to_owned(), Ok(board.as_bytes().to_vec()))]);
+        assert!(app.session.board().net_by_name("GND").is_some(), "{}", app.status);
+        assert!(app.session.storage().kind(Path::new("/received/1/Blinky.brd")).is_ok());
+    }
 
     #[test]
     fn a_typed_extension_does_not_end_up_in_the_folder_name() {

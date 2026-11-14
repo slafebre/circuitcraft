@@ -2138,6 +2138,30 @@ mod tests {
     }
 
     #[test]
+    fn a_zipped_kicad_or_eagle_board_opens_whatever_the_case_of_its_extension() {
+        use std::io::Write as _;
+        let boards = [
+            (
+                "Blinky.KICAD_PCB",
+                r#"(kicad_pcb (version 20240108) (generator test) (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 0 "") (net 1 "GND"))"#,
+            ),
+            ("Blinky.BRD", r#"<eagle version="9"><drawing><board><signals><signal name="GND"/></signals></board></drawing></eagle>"#),
+        ];
+        for (n, (name, text)) in boards.into_iter().enumerate() {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file(format!("Blinky/{name}"), zip::write::SimpleFileOptions::default()).expect("start");
+            zip.write_all(text.as_bytes()).expect("write");
+            let zipped = crate::base64::encode(&zip.finish().expect("zip").into_inner());
+            let mut s = Session::in_memory();
+            let folder = format!("/received/{n}");
+            let taken = s.execute("file.unpack", &json!({ "name": "Blinky.zip", "data": zipped, "folder": folder })).expect("unpack");
+            assert_eq!(path(&taken["path"]), Some(Path::new(&folder).join("Blinky").join(name)), "{name}: the board, not its folder");
+            let opened = s.execute("file.open", &json!({ "path": taken["path"] })).expect("open");
+            assert_eq!((opened["name"].as_str(), s.board().net_by_name("GND").is_some()), (Some("Blinky"), true), "{name}");
+        }
+    }
+
+    #[test]
     fn a_project_is_zipped_and_taken_in_again_as_the_browser_does() {
         let memory = Arc::new(MemoryStorage::default());
         let mut s = sharing(&memory);
