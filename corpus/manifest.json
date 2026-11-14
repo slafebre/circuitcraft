@@ -1,5 +1,5 @@
 {
-  "about": "Public boards the importers are tested on. Each is pinned by repository, commit, path and SHA-256, and fetched from its authors' repository by `cargo xtask corpus`; none is stored here. `counts` is what a person reviewed for the board as imported. `render` will hold the checksum of its reviewed render once there is a renderer.",
+  "about": "Public boards the importers are tested on. Each is pinned by repository, commit, path and SHA-256, and fetched from its authors' repository by `cargo xtask corpus`; none is stored here. `counts` is what a person reviewed for the board as imported. `render` is the SHA-256 of the SVG render of the board with every layer, as a person reviewed it.",
   "boards": [
     {
       "name": "solo-usb-a",
@@ -12,7 +12,7 @@
       "path": "solo/USB-A.brd",
       "sha256": "a30b02a8b82311643c9fc312109bb702783f95cd6a7de132647894a3a3b03cf5",
       "counts": { "copper": 2, "nets": 21, "footprints": 26, "pads": 95, "pads_reached": 82, "tracks": 429, "vias": 43, "zones": 1, "keepouts": 0, "holes": 2, "texts": 2, "drawings": 24, "outline": true, "cutouts": 1 },
-      "render": null
+      "render": "e3b626be3def83bc0987ba12cf08baf1b727d701e26bbbfeba1f4c346f1996a4"
     },
     {
       "name": "solo-a",
@@ -25,7 +25,7 @@
       "path": "kicad/solo-A.kicad_pcb",
       "sha256": "745ac680cd453dca5a2d2cc297df0bee56e9231a997584d4f7d8e75ffd9aba9d",
       "counts": { "copper": 4, "nets": 83, "footprints": 48, "pads": 244, "pads_reached": 196, "tracks": 806, "vias": 74, "zones": 2, "keepouts": 0, "holes": 0, "texts": 6, "drawings": 96, "outline": true, "cutouts": 1 },
-      "render": null
+      "render": "5e2b660a4dce5bfe2ce6fc1533bc0ff0b7e9f2baa05a0e4d571036131ed64656"
     },
     {
       "name": "micromod-esp32",
@@ -38,7 +38,7 @@
       "path": "Hardware/SparkFun_MicroMod_ESP32.brd",
       "sha256": "1ab38c1dd6ef927e156ae83c68e7657a56c0804faf2b82689a43991685a22129",
       "counts": { "copper": 4, "nets": 54, "footprints": 53, "pads": 232, "pads_reached": 165, "tracks": 640, "vias": 144, "zones": 4, "keepouts": 0, "holes": 0, "texts": 7, "drawings": 6, "outline": true, "cutouts": 0 },
-      "render": null
+      "render": "f226c190fbe839b8bdf1de010ff4f45fa17f0fae34695d78e4d1b25c875409c3"
     },
     {
       "name": "redboard-turbo",
@@ -51,7 +51,7 @@
       "path": "Hardware/RedBoard_Turbo.brd",
       "sha256": "83ac7463cd2d4e693e2c5c04cf0e1df3893edc41f6458efcf6d5b4d2db2d85be",
       "counts": { "copper": 2, "nets": 58, "footprints": 149, "pads": 240, "pads_reached": 180, "tracks": 607, "vias": 111, "zones": 2, "keepouts": 0, "holes": 0, "texts": 26, "drawings": 0, "outline": true, "cutouts": 0 },
-      "render": null
+      "render": "5dcf29fa76cefea7c7d9a49608913ffd446d09d797115fccec93edd86e1cc563"
     },
     {
       "name": "qwiic-shield",
@@ -64,7 +64,7 @@
       "path": "Hardware/Qwiic Shield for Arduino.brd",
       "sha256": "a2ed84a73f7cf3ef0825b6fb685809bc988b4e7004c752028c289b05e474846c",
       "counts": { "copper": 2, "nets": 196, "footprints": 104, "pads": 112, "pads_reached": 91, "tracks": 298, "vias": 260, "zones": 2, "keepouts": 0, "holes": 0, "texts": 5, "drawings": 227, "outline": true, "cutouts": 0 },
-      "render": null
+      "render": "772aeec741785077a79c5bc088c25309534c29edf703b21e4825ee4798a68546"
     },
     {
       "name": "olimex-esp32-poe",
@@ -77,7 +77,7 @@
       "path": "HARDWARE/ESP32-PoE-hardware-revision-L/ESP32-PoE_Rev_L.kicad_pcb",
       "sha256": "78bce8140fe7829d7c46c04cf5523d83ac61a5e8bf046e14d38140b1b99e6410",
       "counts": { "copper": 4, "nets": 125, "footprints": 143, "pads": 498, "pads_reached": 445, "tracks": 2574, "vias": 221, "zones": 258, "keepouts": 21, "holes": 0, "texts": 45, "drawings": 7, "outline": true, "cutouts": 0 },
-      "render": null
+      "render": "45b695241981d926158c3068368dfbf12b932ba90a61a056eaace21724489b84"
     },
     {
       "name": "corne-cherry",
@@ -90,7 +90,7 @@
       "path": "pcbs/corne-cherry/hotswap/corne-cherry.kicad_pcb",
       "sha256": "71538a202cb28882b9c9f7b6fe60bf402fb705703a29c59cd6ebb99b9edbb540",
       "counts": { "copper": 2, "nets": 158, "footprints": 180, "pads": 942, "pads_reached": 624, "tracks": 3027, "vias": 452, "zones": 925, "keepouts": 8, "holes": 0, "texts": 15, "drawings": 18, "outline": true, "cutouts": 73 },
-      "render": null
+      "render": "0c72369f7a4e2dbe0844de47fab2741dfe6b85d74911651b2bdc19c872e822f0"
     },
     {
       "name": "bus-pirate-5",
@@ -103,7 +103,7 @@
       "path": "bus_pirate_pcb/5-REV10A/REV10a.kicad_pcb",
       "sha256": "9b6ad556916bf5974da27bc6af76dca1cb4543e78071ba1d8403c60579a50030",
       "counts": { "copper": 4, "nets": 198, "footprints": 220, "pads": 866, "pads_reached": 679, "tracks": 2417, "vias": 547, "zones": 15, "keepouts": 0, "holes": 0, "texts": 29, "drawings": 160, "outline": false, "cutouts": 0 },
-      "render": null
+      "render": "2c4cd48892b292d3e1f5e0b252d7add3a63034ced9020820d45eba5179c37d2a"
     },
     {
       "name": "jetson-nano-baseboard",
@@ -116,7 +116,7 @@
       "path": "jetson-nano-baseboard.kicad_pcb",
       "sha256": "8fc7b361091f1ab5b2026f65fc0c0ea42e16caa705cd52e63c3c48e6ba887252",
       "counts": { "copper": 8, "nets": 488, "footprints": 391, "pads": 1528, "pads_reached": 1231, "tracks": 15624, "vias": 794, "zones": 47, "keepouts": 1, "holes": 0, "texts": 106, "drawings": 167, "outline": true, "cutouts": 0 },
-      "render": null
+      "render": "8b884da0c48ed033c08ce7cf98172e001fc6d0290fb41c18b9efb7afbdeffc9d"
     }
   ]
 }

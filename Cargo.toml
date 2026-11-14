@@ -43,6 +43,10 @@ sha2 = "0.10"
 # geometry: polygon booleans and offsets on i64 coordinates (ROADMAP.md, decided 2026-11-13)
 i_overlay = { version = "9.1.0", default-features = false }
 
+# headless rendering: anti-aliased paths into a pixel buffer, and PNG output (BSD-3-Clause, pure
+# Rust, builds for wasm)
+tiny-skia = "0.12"
+
 # ui
 egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
 eframe = { version = "0.37", default-features = false }

@@ -6,8 +6,13 @@
 //! imports it, and compares what came in with the counts the manifest expects. A board that fails
 //! to import, or comes in with other counts than a person reviewed, fails the command.
 //!
-//! The manifest also has a place for the checksum of each board's reviewed render; it stays
-//! empty until there is a renderer to make one.
+//! Each board is then drawn with every layer, as `render.svg` and `render.png` beside its file,
+//! and the SVG's SHA-256 is compared with the checksum of the render a person reviewed. The SVG is
+//! written from whole nanometres with integer arithmetic; a little floating point before it
+//! (curves, rotations other than quarter turns) is rounded to whole nanometres, so the bytes are
+//! the same from run to run and, barring a maths library that rounds differently, machine to
+//! machine. A change to the importers or the renderer that changes a picture fails the command
+//! until a person has looked at the new picture and recorded its checksum.
 
 use circuitcraft_model::{Board, Footprint, LayerId, NetId, Pad, PadShape, Side};
 use circuitcraft_units::{Nm, Point};
@@ -42,7 +47,12 @@ struct Entry {
     format: String,
     /// The counts a person reviewed, or `None` for a board that has none yet.
     counts: Option<Map<String, Value>>,
+    /// The SHA-256 of the SVG render a person reviewed, or `None` for a board that has none yet.
+    render: Option<String>,
 }
+
+/// The longer side of the PNG drawn beside each board's SVG, for a person to look at.
+const RENDER_SIZE: u32 = 1_600;
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let offline = args.iter().any(|a| a == "--offline");
@@ -60,6 +70,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     for entry in entries.iter().filter(|e| only.is_empty() || only.iter().any(|name| **name == e.name)) {
         match check(root, entry, offline) {
             Ok(counts) => println!("ok    {:<22} {}", entry.name, summary(&counts)),
+            Err(why) if why.starts_with(UNREVIEWED) => {
+                failed += 1;
+                println!("NEW   {:<22} {why}", entry.name);
+            }
             Err(why) => {
                 failed += 1;
                 println!("FAIL  {:<22} {why}", entry.name);
@@ -89,6 +103,11 @@ fn entries(text: &str) -> Result<Vec<Entry>, String> {
             sha256: field("sha256")?,
             format: field("format")?,
             counts: board.get("counts").and_then(Value::as_object).cloned(),
+            render: match board.get("render") {
+                Some(Value::String(sum)) => Some(sum.clone()),
+                None | Some(Value::Null) => None,
+                _ => return Err(format!("board `{}`: `render` is the checksum of its reviewed render, or null", field("name")?)),
+            },
         };
         // Letters and digits, and after the first character a few marks: nothing that could be
         // read as an option, a parent folder or a host.
@@ -100,8 +119,12 @@ fn entries(text: &str) -> Result<Vec<Entry>, String> {
         let path_ok =
             !entry.path.is_empty() && entry.path.split('/').all(|part| !part.is_empty() && part != "." && part != "..") && !entry.path.contains('\\');
         let format_ok = matches!(entry.format.as_str(), "kicad" | "eagle");
-        if !plain(&entry.name, "-") || !repo_ok || !hex(&entry.commit, 40) || !hex(&entry.sha256, 64) || !path_ok || !format_ok {
-            return Err(format!("board `{}`: a name, repository, commit, path, checksum or format is not in the form the manifest uses", entry.name));
+        let render_ok = entry.render.as_deref().is_none_or(|sum| hex(sum, 64));
+        if !plain(&entry.name, "-") || !repo_ok || !hex(&entry.commit, 40) || !hex(&entry.sha256, 64) || !path_ok || !format_ok || !render_ok {
+            return Err(format!(
+                "board `{}`: a name, repository, commit, path, checksum, format or render checksum is not in the form the manifest uses",
+                entry.name
+            ));
         }
         if !names.insert(entry.name.clone()) {
             return Err(format!("board `{}` is listed twice", entry.name));
@@ -129,10 +152,38 @@ fn check(root: &Path, entry: &Entry, offline: bool) -> Result<Map<String, Value>
     let imported = circuitcraft_io::import_board(&text, &entry.name).map_err(|e| format!("import failed: {e}"))?;
     let counts = counts(&imported.board);
     match &entry.counts {
-        Some(expected) if *expected == counts => Ok(counts),
-        Some(expected) => Err(format!("counts differ from the manifest: {}", differences(expected, &counts))),
-        None => Err(format!("the manifest has no reviewed counts yet; it came in as {}", Value::Object(counts))),
+        Some(expected) if *expected == counts => {}
+        Some(expected) => return Err(format!("counts differ from the manifest: {}", differences(expected, &counts))),
+        None => return Err(format!("the manifest has no reviewed counts yet; it came in as {}", Value::Object(counts))),
     }
+    let folder = file.parent().ok_or("no folder")?;
+    let svg = render(&imported.board, folder)?;
+    let found = hex(&Sha256::digest(svg.as_bytes()));
+    let picture = folder.join("render.svg");
+    match &entry.render {
+        Some(expected) if *expected == found => Ok(counts),
+        Some(expected) => {
+            Err(format!("the render differs from the reviewed one ({expected}); if {} is right, record its checksum {found}", picture.display()))
+        }
+        None => Err(format!("{UNREVIEWED}: look at {} and, if it is right, record its checksum {found}", picture.display())),
+    }
+}
+
+/// How the message for a board without a reviewed render begins.
+const UNREVIEWED: &str = "no reviewed render yet";
+
+/// Draws a board with every layer in the order a board is built, into `render.svg` and
+/// `render.png` in `folder`, and returns the SVG.
+fn render(board: &Board, folder: &Path) -> Result<String, String> {
+    let options = circuitcraft_render::Options::all(board);
+    let list = circuitcraft_render::display_list(board, &options);
+    let svg = circuitcraft_render::svg(&list);
+    let png = circuitcraft_render::png(&list, RENDER_SIZE).map_err(|e| format!("render failed: {e}"))?;
+    for (name, bytes) in [("render.svg", svg.as_bytes()), ("render.png", png.as_slice())] {
+        let path = folder.join(name);
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(svg)
 }
 
 /// Where a board's file is kept: `target/corpus/<name>/board.kicad_pcb` or `board.brd`. The
@@ -535,6 +586,16 @@ mod tests {
                 assert!(board[field].as_str().is_some_and(|v| !v.is_empty()), "{} has no {field}", board["name"]);
             }
             assert!(board.get("render").is_some(), "{} has no place for its render's checksum", board["name"]);
+        }
+    }
+
+    #[test]
+    fn a_render_checksum_is_a_checksum_or_null() {
+        for (render, ok) in
+            [("null", true), ("\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"", true), ("\"E3B0\"", false), ("7", false)]
+        {
+            let text = GOOD.replacen("\"format\": \"eagle\"", &format!("\"format\": \"eagle\", \"render\": {render}"), 1);
+            assert_eq!(entries(&text).is_ok(), ok, "{render}");
         }
     }
 }
