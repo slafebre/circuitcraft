@@ -214,6 +214,33 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_finds_an_item_removes_it_and_sees_it_gone() {
+        let mut s = Session::in_memory();
+        let mut call = |command: &str, params: Value| {
+            let line = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "execute", "arguments": { "command": command, "params": params } } });
+            let reply = handle_line(&mut s, &line.to_string()).expect("a reply");
+            assert_eq!(reply["result"]["isError"], false, "{command}: {reply}");
+            reply["result"]["structuredContent"].clone()
+        };
+        call("net.add", json!({ "name": "GND" }));
+        for y in [0, 5] {
+            call("track.add", json!({ "layer": "Top Copper", "from": [0, y], "to": [10, y], "net": "GND" }));
+        }
+        call("track.add", json!({ "layer": "Top Copper", "from": [0, 9], "to": [10, 9] }));
+        let gnd = call("board.query", json!({ "kinds": ["track"], "net": "GND" }));
+        assert_eq!(gnd["total"], 2);
+        let id = gnd["items"][0]["id"].clone();
+        assert_eq!(call("item.info", json!({ "id": id }))["net"], "GND");
+        call("item.remove", json!({ "id": id }));
+        let after = call("board.query", json!({ "kinds": ["track"], "net": "GND" }));
+        assert_eq!(after["total"], 1);
+        assert_ne!(after["items"][0]["id"], id);
+        let commands = call("commands", Value::Null);
+        let read_only = |id: &str| commands["result"].as_array().and_then(|l| l.iter().find(|c| c["id"] == id)).map(|c| c["readOnly"].clone());
+        assert_eq!((read_only("board.query"), read_only("item.info")), (Some(json!(true)), Some(json!(true))));
+    }
+
+    #[test]
     fn errors_are_reported_not_fatal() {
         let replies = run(concat!(
             "not json\n",

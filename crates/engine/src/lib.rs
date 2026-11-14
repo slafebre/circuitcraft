@@ -494,7 +494,21 @@ mod tests {
     #[test]
     fn a_read_only_command_changes_nothing() {
         let read_only: Vec<&str> = COMMANDS.iter().filter(|c| c.read_only).map(|c| c.id).collect();
-        assert_eq!(read_only, ["recovery.list", "select.list", "view.render", "project.info", "board.info", "file.detect", "commands", "about"]);
+        assert_eq!(
+            read_only,
+            [
+                "recovery.list",
+                "select.list",
+                "view.render",
+                "project.info",
+                "board.info",
+                "board.query",
+                "item.info",
+                "file.detect",
+                "commands",
+                "about"
+            ]
+        );
         // A session with something of everything: a saved project, unsaved work that has been
         // autosaved, an undone edit, a selection, a view, and unsaved work left by another session.
         let files = std::sync::Arc::new(circuitcraft_io::storage::MemoryStorage::with_recovery());
@@ -514,7 +528,11 @@ mod tests {
         s.execute("view.layer", &json!({ "layer": "Top Paste", "visible": false })).expect("hide");
         let before = everything(&mut s, &files);
         for id in read_only {
-            let params = if id == "file.detect" { json!({ "path": "/work/Blinky/Blinky.ccpcb" }) } else { json!({}) };
+            let params = match id {
+                "file.detect" => json!({ "path": "/work/Blinky/Blinky.ccpcb" }),
+                "item.info" => json!({ "id": track["id"] }),
+                _ => json!({}),
+            };
             let result = s.execute(id, &params);
             assert!(result.is_ok(), "{id}: {result:?}");
             assert_eq!(everything(&mut s, &files), before, "{id} changed something");
