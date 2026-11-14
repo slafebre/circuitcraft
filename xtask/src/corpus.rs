@@ -14,6 +14,7 @@ use circuitcraft_units::{Nm, Point};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -167,13 +168,16 @@ fn percent_encoded(path: &str) -> String {
     path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
-/// A whole file of at most `limit` bytes; a larger one is refused before it is read.
+/// A whole file of at most `limit` bytes. The read itself stops one byte past the limit, so a
+/// file that is larger, or grows while it is read, is refused without being held in memory.
 fn read(file: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let size = std::fs::metadata(file).map_err(|e| format!("{}: {e}", file.display()))?.len();
-    if size > limit {
+    let failed = |e: std::io::Error| format!("{}: {e}", file.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(file).map_err(failed)?.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(failed)?;
+    if bytes.len() as u64 > limit {
         return Err(format!("{}: larger than {limit} bytes", file.display()));
     }
-    std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))
+    Ok(bytes)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -254,25 +258,35 @@ fn on_copper(footprint: &Footprint, pad: &Pad, end: &End, bottom: usize) -> bool
     })
 }
 
-/// Whether the point `(x, y)`, measured from a copper shape's middle, is on the shape. Rounded
-/// corners are counted as square, and a custom shape as the box around it: the check is for
-/// pads put in the wrong place, not for the last few micrometres of a corner.
+/// Whether the point `(x, y)`, measured from a copper shape's middle, is on the shape, its edge
+/// included (for a custom shape, a point exactly on the edge may count either way).
 fn within(shape: &PadShape, x: i64, y: i64) -> bool {
-    let boxed = |half_width: i64, half_height: i64| x.abs() <= half_width && y.abs() <= half_height;
+    // A box with its corners rounded by `radius`: on it when no further than the radius from the
+    // box that is left when the radius is taken off every side. A rectangle has no radius, an
+    // oval half its narrow side, a circle half its diameter.
+    let rounded = |width: Nm, height: Nm, radius: i64| {
+        // In 128 bits from the start and saturating at the end, so no coordinate or size
+        // overflows on the way, whatever it is.
+        let radius = i128::from(radius);
+        let beyond = |v: i64, half: i64| (i128::from(v).abs() - (i128::from(half) - radius)).max(0);
+        let (dx, dy) = (beyond(x, width.0 / 2), beyond(y, height.0 / 2));
+        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) <= radius.saturating_mul(radius)
+    };
     match shape {
-        PadShape::Circle { diameter } => {
-            let (x, y, r) = (i128::from(x), i128::from(y), i128::from(diameter.0 / 2));
-            x * x + y * y <= r * r
-        }
-        PadShape::Rect { width, height } | PadShape::RoundRect { width, height, .. } | PadShape::Oval { width, height } => {
-            boxed(width.0 / 2, height.0 / 2)
-        }
-        PadShape::Custom { outline } => {
-            let corners: Vec<Point> = std::iter::once(outline.start).chain(outline.edges.iter().map(circuitcraft_geom::Edge::end)).collect();
-            // Between the lowest and the highest corner, along one axis.
-            let spanned = |v: i64, of: fn(&Point) -> i64| corners.iter().map(of).min() <= Some(v) && Some(v) <= corners.iter().map(of).max();
-            spanned(x, |p| p.x.0) && spanned(y, |p| p.y.0)
-        }
+        PadShape::Circle { diameter } => rounded(*diameter, *diameter, diameter.0 / 2),
+        PadShape::Rect { width, height } => rounded(*width, *height, 0),
+        PadShape::RoundRect { width, height, radius } => rounded(*width, *height, radius.0),
+        PadShape::Oval { width, height } => rounded(*width, *height, width.0.min(height.0) / 2),
+        // An odd number of the outline's edges to the right of the point: it is inside.
+        PadShape::Custom { outline } => outline.flatten(Nm(10_000)).is_ok_and(|ring| {
+            let crossings = (0..ring.len()).filter(|&i| {
+                let (Some(a), Some(b)) = (ring.get(i), ring.get((i + 1) % ring.len())) else { return false };
+                let wide = |v: i64, from: i64| i128::from(v) - i128::from(from);
+                let side = wide(b.x.0, a.x.0).saturating_mul(wide(y, a.y.0)).saturating_sub(wide(b.y.0, a.y.0).saturating_mul(wide(x, a.x.0)));
+                (a.y.0 > y) != (b.y.0 > y) && (side > 0) == (b.y.0 > a.y.0)
+            });
+            crossings.count() % 2 == 1
+        }),
     }
 }
 
@@ -342,7 +356,9 @@ mod tests {
         assert!(entries(&crowded).is_err_and(|e| e.contains("more than")));
         let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(read(&missing, 10).is_err_and(|e| e.contains("larger than 10 bytes")));
-        assert!(read(&missing, MAX_MANIFEST_BYTES).is_ok());
+        // A file exactly as long as the limit is read; a byte longer is not.
+        let length = read(&missing, MAX_MANIFEST_BYTES).expect("read").len() as u64;
+        assert!(read(&missing, length).is_ok() && read(&missing, length - 1).is_err());
     }
 
     /// A footprint at (10, 10) mm, turned 20 degrees, on `side`.
@@ -404,15 +420,51 @@ mod tests {
         let buried = Pad { front: None, back: None, ..drilled.clone() };
         assert_eq!([(0, 0), (1, 1), (2, 2), (3, 3), (0, 3)].map(|layers| on(&buried, layers, 3)), [false, true, true, false, true]);
         assert_eq!([(0, 0), (1, 1), (0, 1)].map(|layers| on(&buried, layers, 1)), [false; 3]);
-        // A shape of its own counts as the box around it; a round one as its circle.
+        // A shape of its own is reached within its outline, not within the box around it: the
+        // triangle is half a millimetre to either side at its middle height, and a point at its
+        // top.
         let triangle = circuitcraft_geom::Contour::polyline(&[mm(-1, -1), mm(1, -1), mm(0, 1)]).expect("triangle");
         let custom = Pad::smd("3", mm(0, 0), PadShape::Custom { outline: triangle });
         let round = Pad::smd("4", mm(0, 0), PadShape::Circle { diameter: Nm(1_000_000) });
         let inside = |pad: &Pad, x: i64, y: i64| on_copper(&bottom, pad, &End { at: on_board(&bottom, pad, x, y), layers: (3, 3) }, 3);
         assert_eq!(
-            [inside(&custom, 900, -900), inside(&custom, -990, 990), inside(&custom, 1_100, 0), inside(&custom, 0, -1_100)],
-            [true, true, false, false]
+            [inside(&custom, 900, -900), inside(&custom, 0, 900), inside(&custom, 400, 0), inside(&custom, 600, 0)],
+            [true, true, true, false]
         );
+        assert_eq!([inside(&custom, -990, 990), inside(&custom, 1_100, 0), inside(&custom, 0, -1_100)], [false; 3]);
+        // An oval and a rounded rectangle, 2 mm by 1 mm: a point near a corner is in the box
+        // around them and off their copper.
+        let oval = Pad::smd("5", mm(0, 0), PadShape::Oval { width: Nm(2_000_000), height: Nm(1_000_000) });
+        assert_eq!([inside(&oval, 900, 200), inside(&oval, 990, 0), inside(&oval, 950, 400), inside(&oval, 0, 510)], [true, true, false, false]);
+        let upright = Pad::smd("6", mm(0, 0), PadShape::Oval { width: Nm(1_000_000), height: Nm(2_000_000) });
+        assert_eq!([inside(&upright, 200, 900), inside(&upright, 400, 950)], [true, false]);
+        let softened = PadShape::RoundRect { width: Nm(2_000_000), height: Nm(1_000_000), radius: Nm(200_000) };
+        let softened = Pad::smd("7", mm(0, 0), softened);
+        assert_eq!(
+            [
+                inside(&softened, 900, 400),
+                inside(&softened, 990, 0),
+                inside(&softened, 0, 490),
+                inside(&softened, 950, 450),
+                inside(&softened, 1_010, 0)
+            ],
+            [true, true, true, false, false]
+        );
+        // A point level with a corner of an outline is judged by the edges that meet there:
+        // inside a diamond at the height of its side corners, and outside beyond them.
+        let diamond = circuitcraft_geom::Contour::polyline(&[mm(-1, 0), mm(0, -1), mm(1, 0), mm(0, 1)]).expect("diamond");
+        let diamond = PadShape::Custom { outline: diamond };
+        assert_eq!([within(&diamond, 500_000, 0), within(&diamond, -500_000, 0), within(&diamond, 0, 0)], [true; 3]);
+        assert_eq!([within(&diamond, 1_100_000, 0), within(&diamond, -1_100_000, 0), within(&diamond, 600_000, 600_000)], [false; 3]);
+        // Sizes and places no board has get an answer too, not an overflow.
+        for (width, radius) in [(i64::MAX, i64::MIN), (i64::MIN, i64::MAX), (i64::MIN, i64::MIN), (i64::MAX, i64::MAX)] {
+            let huge = PadShape::RoundRect { width: Nm(width), height: Nm(width), radius: Nm(radius) };
+            let _ = [within(&huge, i64::MIN, i64::MIN), within(&huge, i64::MAX, i64::MIN), within(&huge, 0, 0)];
+        }
+        assert!(!within(&diamond, i64::MIN, i64::MAX) && !within(&diamond, i64::MAX, 0));
+        // A rectangle keeps its corners.
+        let square = Pad::smd("8", mm(0, 0), PadShape::Rect { width: Nm(2_000_000), height: Nm(1_000_000) });
+        assert_eq!([inside(&square, 990, 490), inside(&square, 1_010, 0), inside(&square, 0, 510)], [true, false, false]);
         assert_eq!([inside(&round, 300, 300), inside(&round, 0, 490), inside(&round, 450, 450), inside(&round, 510, 0)], [true, true, false, false]);
     }
 
