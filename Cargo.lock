@@ -642,6 +642,7 @@ dependencies = [
  "circuitcraft-engine",
  "circuitcraft-ui-egui",
  "eframe",
+ "serde_json",
 ]
 
 [[package]]
