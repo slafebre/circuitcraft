@@ -16,6 +16,7 @@ circuitcraft-model = { workspace = true }
 circuitcraft-geom = { workspace = true }
 circuitcraft-units = { workspace = true }
 circuitcraft-io = { workspace = true }
+circuitcraft-import = { workspace = true }
 circuitcraft-render = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

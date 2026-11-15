@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-circuitcraft-io = { workspace = true }
+circuitcraft-import = { workspace = true }
 circuitcraft-model = { workspace = true }
 circuitcraft-render = { workspace = true }
 circuitcraft-units = { workspace = true }

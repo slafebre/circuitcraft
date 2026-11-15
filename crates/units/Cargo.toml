@@ -6,7 +6,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-publish = false
+readme = "README.md"
+keywords = ["pcb", "eda", "units", "nanometre", "geometry"]
+categories = ["science", "mathematics"]
 
 [lints]
 workspace = true

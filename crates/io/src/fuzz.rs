@@ -5,8 +5,14 @@
 //! board it returns is valid; and that board survives a save and a reload unchanged, so nothing
 //! an import produces is something our own format can't hold.
 
-use crate::{eagle, kicad, native};
+use crate::native;
+use circuitcraft_import::{eagle, kicad};
 use circuitcraft_model::Board;
+
+/// The import crate's own synthetic sample boards.
+const KICAD_BOARD: &str = include_str!("../../import/samples/board.kicad_pcb");
+const KICAD_OLD: &str = include_str!("../../import/samples/old.kicad_pcb");
+const EAGLE_BOARD: &str = include_str!("../../import/samples/board.brd");
 
 /// A small random number generator (xorshift64*), seeded per test.
 struct Random(u64);
@@ -184,8 +190,7 @@ fn storm(samples: &[&str], seed: u64, rounds: usize, read: impl Fn(&str) -> Opti
 
 #[test]
 fn damaged_kicad_boards_are_read_or_refused() {
-    let read_fine =
-        storm(&[kicad::tests::BOARD, kicad::tests::OLD], 0x5eed_0001, 3_000, |text| kicad::read_board(text, "fuzz").ok().map(|i| i.board));
+    let read_fine = storm(&[KICAD_BOARD, KICAD_OLD], 0x5eed_0001, 3_000, |text| kicad::read_board(text, "fuzz").ok().map(|i| i.board));
     // The reader leaves out what it can't read, so many damaged files still give a board. If few
     // did, the test would be exercising the parser alone: a third of them must.
     assert!(read_fine > 2_000, "only {read_fine} of 6,000 damaged files still read");
@@ -193,7 +198,7 @@ fn damaged_kicad_boards_are_read_or_refused() {
 
 #[test]
 fn damaged_eagle_boards_are_read_or_refused() {
-    let read_fine = storm(&[eagle::tests::BOARD], 0x5eed_0002, 6_000, |text| eagle::read_board(text, "fuzz").ok().map(|i| i.board));
+    let read_fine = storm(&[EAGLE_BOARD], 0x5eed_0002, 6_000, |text| eagle::read_board(text, "fuzz").ok().map(|i| i.board));
     // An XML document is spoilt by smaller damage than a list of items is: a quarter must read.
     assert!(read_fine > 1_500, "only {read_fine} of 6,000 damaged files still read");
 }
@@ -201,11 +206,10 @@ fn damaged_eagle_boards_are_read_or_refused() {
 #[test]
 fn damaged_native_boards_are_read_or_refused() {
     // Our own format, written from the boards the importers make: the widest mix of items.
-    let samples: Vec<String> =
-        [kicad::read_board(kicad::tests::BOARD, "a"), kicad::read_board(kicad::tests::OLD, "b"), eagle::read_board(eagle::tests::BOARD, "c")]
-            .into_iter()
-            .map(|imported| native::write_board(&imported.expect("import").board).expect("write"))
-            .collect();
+    let samples: Vec<String> = [kicad::read_board(KICAD_BOARD, "a"), kicad::read_board(KICAD_OLD, "b"), eagle::read_board(EAGLE_BOARD, "c")]
+        .into_iter()
+        .map(|imported| native::write_board(&imported.expect("import").board).expect("write"))
+        .collect();
     let samples: Vec<&str> = samples.iter().map(String::as_str).collect();
     // A strict format refuses nearly every damaged file; the ones it reads must still hold up.
     storm(&samples, 0x5eed_0003, 2_000, |text| native::read_board(text).ok());
@@ -221,12 +225,12 @@ fn damaged_native_boards_are_read_or_refused() {
 #[test]
 fn damaged_files_of_any_kind_are_told_apart_or_not_at_all() {
     let mut random = Random(0x5eed_0005);
-    for sample in [kicad::tests::BOARD, eagle::tests::BOARD] {
+    for sample in [KICAD_BOARD, EAGLE_BOARD] {
         for _ in 0..3_000 {
             let text = damaged(sample, &mut random);
             // Whatever `detect` makes of it, importing by content agrees or refuses.
             let _ = crate::detect(text.as_bytes());
-            if let Ok(imported) = crate::import_board(&text, "fuzz") {
+            if let Ok(imported) = circuitcraft_import::import_board(&text, "fuzz") {
                 assert_eq!(imported.board.validate(), Ok(()));
             }
         }

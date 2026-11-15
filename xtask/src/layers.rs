@@ -21,8 +21,9 @@ pub const TABLE: &[(&str, Class)] = &[
     ("geom", Class::Layer(0)),
     // L1 the design database
     ("model", Class::Layer(1)),
-    // L2 content, rules and drawing
+    // L2 content, rules, drawing and reading other programs' files
     ("library", Class::Layer(2)),
+    ("import", Class::Layer(2)),
     ("rules", Class::Layer(2)),
     ("render", Class::Layer(2)),
     // L3 algorithms and formats

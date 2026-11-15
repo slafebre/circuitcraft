@@ -313,7 +313,7 @@ fn file_open(s: &mut Session, p: FileOpen) -> Result<Value, EngineError> {
 /// Reads `path` as another program's board, if it is a file that holds one: `None` for a folder,
 /// one of our own files or anything unrecognised, which `file.open` then opens as before. What
 /// the file holds decides, not what it is called.
-fn import(s: &Session, path: &Path) -> Result<Option<(circuitcraft_io::import::Imported, Format)>, EngineError> {
+fn import(s: &Session, path: &Path) -> Result<Option<(circuitcraft_import::Imported, Format)>, EngineError> {
     // A folder, or anything else that isn't a file to read, is for `native::open` to open or refuse.
     let Ok(text) = native::read_text(s.storage(), path) else { return Ok(None) };
     let format = match circuitcraft_io::detect(text.as_bytes()) {
@@ -322,7 +322,7 @@ fn import(s: &Session, path: &Path) -> Result<Option<(circuitcraft_io::import::I
     };
     // A board has no name of its own in these files: it gets the file's.
     let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let imported = circuitcraft_io::import_board(&text, &name).map_err(|e| failed(format!("{}: {e}", path.display())))?;
+    let imported = circuitcraft_import::import_board(&text, &name).map_err(|e| failed(format!("{}: {e}", path.display())))?;
     Ok(Some((imported, format)))
 }
 

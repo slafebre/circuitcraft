@@ -14,12 +14,14 @@ use std::process::{Command, ExitCode};
 const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
-  ci       fmt, clippy, test, assets, licenses, layers, wasm (what CI runs)
+  ci       fmt, clippy, test, assets, licenses, layers, wasm, package (what CI runs)
   test     cargo test --workspace
   layers   check the crate layering (xtask/src/layers.rs)
   assets   check that every asset file has a row in ATTRIBUTION.md
   licenses check every dependency's licence against the allowlist (xtask/src/licenses.rs)
   wasm     check that the browser build compiles
+  package  check that the crates other programs use still package and build on their own (needs
+           a network, or the crates.io index already in cargo's cache)
   bundle   build dist/CircuitCraft.app, a macOS app bundle for this machine (signed ad hoc)
   corpus   fetch the public boards pinned in corpus/manifest.json into target/corpus, import each
            and compare it with the manifest (needs curl and a network; --offline uses what is
@@ -34,6 +36,7 @@ fn main() -> ExitCode {
         Some("assets") => assets::run(&root()),
         Some("licenses") => cmd_licenses(),
         Some("wasm") => cmd_wasm(),
+        Some("package") => cmd_package(),
         Some("bundle") => bundle::run(&root()),
         Some("corpus") => corpus::run(&root(), args.get(1..).unwrap_or_default()),
         Some("-h" | "--help" | "help") | None => {
@@ -113,6 +116,7 @@ const WASM_PACKAGES: &[&str] = &[
     "circuitcraft-units",
     "circuitcraft-geom",
     "circuitcraft-model",
+    "circuitcraft-import",
     "circuitcraft-render",
     "circuitcraft-io",
     "circuitcraft-engine",
@@ -127,6 +131,23 @@ fn cmd_wasm() -> Result<(), String> {
         c.args(["-p", p]);
     }
     run(c, "cargo check --target wasm32-unknown-unknown (libraries and circuitcraft-web)")
+}
+
+/// The crates published on crates.io for other programs (AGENTS.md, "Crates other programs use").
+const PUBLISHED: &[&str] = &["circuitcraft-units", "circuitcraft-geom", "circuitcraft-model", "circuitcraft-import"];
+
+/// Packages each published crate and builds it from its package alone, the way `cargo publish`
+/// would, without publishing anything. It reads the crates.io index, so it needs a network or
+/// cargo's cached copy of the index. This catches what only shows up there: a dependency on a
+/// crate that isn't published, or a file the package leaves out. Changes not yet committed are
+/// packaged too, so the check runs before a commit.
+fn cmd_package() -> Result<(), String> {
+    let mut c = cargo();
+    c.args(["package", "--allow-dirty", "--quiet"]);
+    for p in PUBLISHED {
+        c.args(["-p", p]);
+    }
+    run(c, "cargo package (the published crates)")
 }
 
 type Step = (&'static str, fn() -> Result<(), String>);
@@ -145,7 +166,7 @@ fn cmd_ci() -> Result<(), String> {
     fn assets_step() -> Result<(), String> {
         assets::run(&root())
     }
-    let steps: [Step; 7] = [
+    let steps: [Step; 8] = [
         ("fmt", fmt),
         ("clippy", clippy),
         ("test", cmd_test),
@@ -153,6 +174,7 @@ fn cmd_ci() -> Result<(), String> {
         ("licenses", cmd_licenses),
         ("layers", cmd_layers),
         ("wasm", cmd_wasm),
+        ("package", cmd_package),
     ];
     for (i, (name, step)) in steps.iter().enumerate() {
         eprintln!("\n=== ci: {name} ===");

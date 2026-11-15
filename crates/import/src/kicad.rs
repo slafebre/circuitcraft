@@ -977,7 +977,7 @@ impl ZoneSettings {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use circuitcraft_geom::Edge;
 
@@ -991,48 +991,7 @@ pub(crate) mod tests {
     /// A small board as KiCad 7 writes one: a resistor on the top, a connector on the bottom
     /// turned a quarter, an outline with a round cutout, tracks, a via, a zone on both sides and a
     /// keepout.
-    pub(crate) const BOARD: &str = r#"(kicad_pcb (version 20221018) (generator pcbnew)
-  (general (thickness 1.6))
-  (paper "A4")
-  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user "B.Silkscreen") (37 "F.SilkS" user "F.Silkscreen")
-    (38 "B.Mask" user) (39 "F.Mask" user) (40 "Dwgs.User" user "User.Drawings") (44 "Edge.Cuts" user))
-  (setup (pad_to_mask_clearance 0.05) (aux_axis_origin 10 20) (pcbplotparams (viasonmask false)))
-  (net 0 "") (net 1 "GND") (net 2 "VCC")
-  (footprint "Resistor_SMD:R_0603" (layer "F.Cu") (at 20 10 90) (attr smd)
-    (fp_text reference "R1" (at 0 -1.5 90) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
-    (fp_text value "10k" (at 0 1.5 90) (layer "F.Fab") hide (effects (font (size 1 1) (thickness 0.15))))
-    (fp_text user "${REFERENCE}" (at 0 0 90) (layer "F.Fab") (effects (font (size 0.5 0.5) (thickness 0.08))))
-    (fp_line (start -1 -0.5) (end 1 -0.5) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
-    (pad "1" smd roundrect (at -0.8 0 90) (size 0.9 1) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
-    (pad "2" smd rect (at 0.8 0 90) (size 0.9 1) (layers "F.Cu" "F.Mask") (net 2 "VCC") (solder_mask_margin 0.1))
-  )
-  (footprint "Conn:Pin" (layer "B.Cu") (at 30 10 90) (attr through_hole exclude_from_bom)
-    (property "Reference" "J1" (at 0 -2 90) (layer "B.SilkS") (effects (font (size 1 1) (thickness 0.15)) (justify mirror)))
-    (pad "1" thru_hole oval (at 1 2 90) (size 1.6 2.4) (drill oval 0.8 1.6) (layers "*.Cu" "*.Mask") (net 1 "GND"))
-    (pad "" np_thru_hole circle (at -3 0) (size 2 2) (drill 2) (layers "*.Cu" "*.Mask"))
-    (pad "" smd rect (at 0 4 90) (size 1 2) (layers "B.Paste"))
-    (fp_line (start -2 -2) (end 2 -2) (stroke (width 0.1) (type solid)) (layer "B.SilkS"))
-  )
-  (gr_line (start 0 0) (end 40 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
-  (gr_line (start 40 0) (end 40 20) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
-  (gr_line (start 40 20) (end 0 20) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
-  (gr_line (start 0 20) (end 0 0) (stroke (width 0.1) (type default)) (layer "Edge.Cuts"))
-  (gr_circle (center 5 15) (end 6 15) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
-  (gr_rect (start 1 1) (end 3 2) (stroke (width 0.1) (type default)) (fill solid) (layer "Dwgs.User"))
-  (gr_text "REV A" (at 5 5 90) (layer "F.SilkS") (effects (font (size 1.5 1.5) (thickness 0.2)) (justify left)))
-  (segment (start 20 10.8) (end 32 9) (width 0.25) (layer "F.Cu") (net 1))
-  (arc (start 32 9) (mid 33 9.4) (end 33 10.2) (width 0.25) (layer "B.Cu") (net 1))
-  (via (at 32 9) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
-  (zone (net 1) (net_name "GND") (layers "F&B.Cu") (hatch edge 0.5) (priority 2) (connect_pads (clearance 0.3)) (min_thickness 0.2)
-    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.5) (island_removal_mode 1))
-    (polygon (pts (xy 1 1) (xy 39 1) (xy 39 19) (xy 1 19)))
-    (filled_polygon (layer "F.Cu") (pts (xy 2 2) (xy 38 2) (xy 38 18) (xy 2 18))))
-  (zone (net 0) (net_name "") (layer "B.Cu") (hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.2)
-    (keepout (tracks allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed) (footprints allowed))
-    (fill (thermal_gap 0.5) (thermal_bridge_width 0.5))
-    (polygon (pts (xy 5 5) (xy 8 5) (xy 8 8))))
-)
-"#;
+    const BOARD: &str = include_str!("../samples/board.kicad_pcb");
 
     fn layer(board: &Board, id: LayerId) -> &str {
         board.stack.get(id).map_or("?", |l| l.name.as_str())
@@ -1168,39 +1127,7 @@ pub(crate) mod tests {
 
     /// The same kind of board as KiCad 5 writes it: bare words, `module`, arcs given by their
     /// centre and a clockwise angle, four copper layers.
-    pub(crate) const OLD: &str = r#"(kicad_pcb (version 20171130) (host pcbnew "(5.1.5)")
-  (general (thickness 0.8) (drawings 9) (tracks 2))
-  (layers (0 F.Cu signal) (1 In1.Cu signal) (2 In2.Cu signal) (31 B.Cu signal) (37 F.SilkS user) (40 Dwgs.User user) (44 Edge.Cuts user))
-  (setup (last_trace_width 0.2) (trace_clearance 0.15) (via_size 0.6) (via_drill 0.3) (pad_to_mask_clearance 0.051)
-    (pcbplotparams (viasonmask true)))
-  (net 0 "") (net 1 +3V3)
-  (net_class Default "the default" (clearance 0.127) (add_net +3V3))
-  (module Lib:Part (layer F.Cu) (tedit 5B301BBE) (tstamp 5DF910C6) (at 10 10 270)
-    (fp_text reference U1 (at 0 0) (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))
-    (fp_arc (start 0 0) (end 1 0) (angle 90) (layer F.SilkS) (width 0.1))
-    (fp_circle (center 0 0) (end 0.5 0) (layer F.SilkS) (width 0.1))
-    (fp_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (layer F.SilkS) (width 0.1))
-    (pad 1 thru_hole circle (at 0 2 270) (size 1.5 1.5) (drill 0.8) (layers *.Cu *.Mask) (net 1 +3V3))
-    (pad 2 smd custom (at 0 -2 270) (size 1 1) (layers F.Cu F.Mask) (options (clearance outline) (anchor rect))
-      (primitives (gr_poly (pts (xy -1 -1) (xy 1 -1) (xy 0 1)) (width 0))))
-    (pad 3 smd trapezoid (at 3 0 270) (size 1 1) (rect_delta 0 0.2) (layers F.Cu))
-    (model x.wrl (at (xyz 0 0 0)))
-  )
-  (gr_line (start 1 0) (end 9 0) (layer Edge.Cuts) (width 0.1))
-  (gr_arc (start 9 1) (end 9 0) (angle 90) (layer Edge.Cuts) (width 0.1))
-  (gr_line (start 10 1) (end 10 9) (layer Edge.Cuts) (width 0.1))
-  (gr_arc (start 9 9) (end 10 9) (angle 90) (layer Edge.Cuts) (width 0.1))
-  (gr_line (start 9 10) (end 1 10) (layer Edge.Cuts) (width 0.1))
-  (gr_arc (start 1 9) (end 1 10) (angle 90) (layer Edge.Cuts) (width 0.1))
-  (gr_line (start 0 9) (end 0 1) (layer Edge.Cuts) (width 0.1))
-  (gr_arc (start 1 1) (end 0 1) (angle 90) (layer Edge.Cuts) (width 0.1))
-  (segment (start 8 10) (end 20 12) (width 0.2) (layer In1.Cu) (net 1))
-  (via (at 20 12) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 1))
-  (dimension 5 (width 0.1) (layer Dwgs.User))
-  (zone (net 0) (net_name "") (layer F.Mask) (hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.2)
-    (fill yes) (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))
-)
-"#;
+    const OLD: &str = include_str!("../samples/old.kicad_pcb");
 
     #[test]
     fn a_kicad_5_board_reads_the_same_way() {

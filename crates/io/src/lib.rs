@@ -1,33 +1,19 @@
-//! File formats: CircuitCraft's own project and board files ([`native`]), detection, read-only
-//! import of KiCad ([`kicad`]) and EAGLE ([`eagle`]) boards, fabrication outputs in 0.5.
+//! File formats: CircuitCraft's own project and board files ([`native`]), the storage they go
+//! through ([`storage`]), zipped project folders ([`archive`]) and detection of every file the
+//! app knows. Reading other programs' boards is the `circuitcraft-import` crate, published on its
+//! own so other programs can use it; fabrication outputs arrive in 0.5.
 //!
 //! Every reader treats its input as hostile: no panics, bounded allocations, bounded recursion.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod archive;
-pub mod eagle;
 #[cfg(test)]
 mod fuzz;
-pub mod import;
-pub mod kicad;
 pub mod native;
-mod sexp;
 pub mod storage;
-mod xml;
-
-/// Reads a board another program wrote, telling which by its content. `name` becomes the
-/// board's name. The result is a new board to work on and save as a CircuitCraft project; the
-/// file it came from is never written.
-pub fn import_board(text: &str, name: &str) -> Result<import::Imported, import::ImportError> {
-    match detect(text.as_bytes()) {
-        Some(Format::KicadPcb) => kicad::read_board(text, name),
-        Some(Format::Eagle) => eagle::read_board(text, name),
-        _ => Err(import::ImportError::WrongFormat("a KiCad or EAGLE board")),
-    }
-}
 
 /// How many bytes [`detect`] looks at.
-pub const SNIFF_LEN: usize = 4096;
+pub const SNIFF_LEN: usize = circuitcraft_import::SNIFF_LEN;
 
 /// A file format CircuitCraft recognises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,11 +40,23 @@ impl Format {
         match self {
             Format::CircuitCraftBoard => "CircuitCraft board",
             Format::CircuitCraftProject => "CircuitCraft project",
-            Format::Eagle => "EAGLE",
-            Format::KicadPcb => "KiCad board",
-            Format::KicadSch => "KiCad schematic",
-            Format::KicadSymbolLib => "KiCad symbol library",
-            Format::KicadFootprint => "KiCad footprint",
+            Format::Eagle => circuitcraft_import::Format::Eagle.name(),
+            Format::KicadPcb => circuitcraft_import::Format::KicadPcb.name(),
+            Format::KicadSch => circuitcraft_import::Format::KicadSch.name(),
+            Format::KicadSymbolLib => circuitcraft_import::Format::KicadSymbolLib.name(),
+            Format::KicadFootprint => circuitcraft_import::Format::KicadFootprint.name(),
+        }
+    }
+}
+
+impl From<circuitcraft_import::Format> for Format {
+    fn from(format: circuitcraft_import::Format) -> Format {
+        match format {
+            circuitcraft_import::Format::Eagle => Format::Eagle,
+            circuitcraft_import::Format::KicadPcb => Format::KicadPcb,
+            circuitcraft_import::Format::KicadSch => Format::KicadSch,
+            circuitcraft_import::Format::KicadSymbolLib => Format::KicadSymbolLib,
+            circuitcraft_import::Format::KicadFootprint => Format::KicadFootprint,
         }
     }
 }
@@ -66,22 +64,12 @@ impl Format {
 /// Recognises a format from the first bytes of a file (only the first [`SNIFF_LEN`] are read).
 /// Content decides, not the file name, so a renamed file is still recognised.
 pub fn detect(bytes: &[u8]) -> Option<Format> {
+    if let Some(format) = circuitcraft_import::detect(bytes) {
+        return Some(format.into());
+    }
     let head = bytes.get(..bytes.len().min(SNIFF_LEN)).unwrap_or_default();
     let text = String::from_utf8_lossy(head);
     let text = text.trim_start_matches('\u{feff}').trim_start();
-    if let Some(rest) = text.strip_prefix('(') {
-        let word: String = rest.trim_start().chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-        return match word.as_str() {
-            "kicad_pcb" => Some(Format::KicadPcb),
-            "kicad_sch" => Some(Format::KicadSch),
-            "kicad_symbol_lib" => Some(Format::KicadSymbolLib),
-            "footprint" | "module" => Some(Format::KicadFootprint),
-            _ => None,
-        };
-    }
-    if text.starts_with('<') && has_eagle_root(text) {
-        return Some(Format::Eagle);
-    }
     if text.starts_with('{') {
         return match native_format(text) {
             Some(native::BOARD_FORMAT) => Some(Format::CircuitCraftBoard),
@@ -100,34 +88,25 @@ fn native_format(text: &str) -> Option<&str> {
     value.split_once('"').map(|(v, _)| v)
 }
 
-/// Whether an XML prefix opens an `<eagle` element (after the declaration, comments and doctype).
-fn has_eagle_root(text: &str) -> bool {
-    text.match_indices('<').any(|(i, _)| {
-        text.get(i + 1..)
-            .and_then(|after| after.strip_prefix("eagle"))
-            .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/'))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn detects_kicad_by_content() {
-        assert_eq!(detect(b"(kicad_pcb (version 20240108) (generator x))"), Some(Format::KicadPcb));
-        assert_eq!(detect(b"\xef\xbb\xbf  (kicad_sch (version 1))"), Some(Format::KicadSch));
-        assert_eq!(detect(b"(kicad_symbol_lib)"), Some(Format::KicadSymbolLib));
-        assert_eq!(detect(b"(footprint \"R_0603\")"), Some(Format::KicadFootprint));
+    fn other_programs_files_are_told_apart_by_the_import_crate() {
+        assert_eq!(detect(b"(kicad_pcb (version 20240108))"), Some(Format::KicadPcb));
+        assert_eq!(detect(b"<?xml version=\"1.0\"?>\n<eagle version=\"9.6.2\">"), Some(Format::Eagle));
         assert_eq!(detect(b"(something_else)"), None);
-    }
-
-    #[test]
-    fn detects_eagle_xml() {
-        let xml = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE eagle SYSTEM \"eagle.dtd\">\n<eagle version=\"9.6.2\">";
-        assert_eq!(detect(xml), Some(Format::Eagle));
-        assert_eq!(detect(b"<eagles>"), None);
-        assert_eq!(detect(b"<svg></svg>"), None);
+        for (theirs, ours) in [
+            (circuitcraft_import::Format::Eagle, Format::Eagle),
+            (circuitcraft_import::Format::KicadPcb, Format::KicadPcb),
+            (circuitcraft_import::Format::KicadSch, Format::KicadSch),
+            (circuitcraft_import::Format::KicadSymbolLib, Format::KicadSymbolLib),
+            (circuitcraft_import::Format::KicadFootprint, Format::KicadFootprint),
+        ] {
+            assert_eq!(Format::from(theirs), ours);
+            assert_eq!(ours.name(), theirs.name());
+        }
     }
 
     #[test]
