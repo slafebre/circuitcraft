@@ -1,6 +1,6 @@
 [package]
 name = "circuitcraft-import"
-description = "Read KiCad and EAGLE board files into a validated board model: hostile-input safe, no panics, integer nanometres"
+description = "Read KiCad and EAGLE boards and KiCad schematics into validated models: hostile-input safe, no panics, integer nanometres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

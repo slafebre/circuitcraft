@@ -1,4 +1,4 @@
-//! KiCad board files (`.kicad_pcb`), read-only.
+//! KiCad board files (`.kicad_pcb`), read-only, and schematics ([`read_schematic`]).
 //!
 //! Written from KiCad's published description of the format and from real boards, for the files
 //! KiCad 5 to 9 write. The reader keeps what the model holds and says in the notes what it left
@@ -10,6 +10,8 @@
 //! - A pad's and a footprint text's angle is written as it ends up on the board; the model holds
 //!   it relative to the footprint.
 //! - Drawings on `Edge.Cuts` become the board outline when they close into one.
+
+pub use crate::kicad_sch::{MAX_SCHEMATIC_BYTES, read_schematic};
 
 use crate::import::{self, Ids, ImportError, Imported, Layers, Notes, Standard};
 use crate::sexp::{Node, Reader};

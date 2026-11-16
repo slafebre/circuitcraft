@@ -45,6 +45,11 @@ pub(crate) fn bounded_vec<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D, 
     d.deserialize_seq(Bounded(max, PhantomData))
 }
 
+/// [`bounded_vec`] with its limit in the type, for `#[serde(deserialize_with = "...")]`.
+pub(crate) fn bounded<'de, D: Deserializer<'de>, T: Deserialize<'de>, const MAX: usize>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_vec(d, MAX)
+}
+
 /// At the limit: fails if the list goes on. The next element is refused before any of it is read
 /// (even skipping it would walk its contents, which in a hostile file may be nested without end).
 fn refuse_more<'de, A: SeqAccess<'de>>(seq: &mut A, max: usize) -> Result<(), A::Error> {
