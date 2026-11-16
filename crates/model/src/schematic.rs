@@ -678,9 +678,15 @@ impl Schematic {
         let mut claim = |id: u128| {
             if id == 0 || !ids.insert(id) { Err(ModelError::BadId(ItemId::from_u128(id).to_string())) } else { Ok(()) }
         };
+        // The symbols a power port can be drawn with, those with a power input pin, found once
+        // rather than for each port.
+        let mut supplies = BTreeSet::new();
         for s in self.symbols.iter() {
             claim(s.id.as_u128())?;
             check_symbol(s)?;
+            if std::iter::once(&s.shared).chain(&s.units).flat_map(|u| &u.pins).any(|pin| pin.kind == PinKind::PowerIn) {
+                supplies.insert(s.id);
+            }
         }
         for sheet in self.sheets.iter() {
             claim(sheet.id.as_u128())?;
@@ -730,7 +736,7 @@ impl Schematic {
                 check_quarter(p.rotation, "power port rotation")?;
                 if let Some(symbol) = p.symbol {
                     let s = self.symbols.get(symbol).ok_or_else(|| ModelError::BadId(symbol.to_string()))?;
-                    if !std::iter::once(&s.shared).chain(&s.units).flat_map(|u| &u.pins).any(|pin| pin.kind == PinKind::PowerIn) {
+                    if !supplies.contains(&symbol) {
                         return Err(ModelError::BadName(s.name.clone(), "a power port's symbol needs a power input pin"));
                     }
                 }
@@ -1185,6 +1191,23 @@ mod tests {
             port.symbol = Some(resistor);
         }
         assert_eq!(s.validate(), Err(ModelError::BadName("R".to_owned(), "a power port's symbol needs a power input pin")));
+        // A symbol whose power input is its last pin is a fine one for a port.
+        let mut s = sample();
+        let mut supply = s.symbols.get(resistor).cloned().expect("symbol");
+        supply.id = SymbolId::from_u128(77);
+        supply.name = "VCC".to_owned();
+        if let Some(unit) = supply.units.first_mut()
+            && let Some(last) = unit.pins.last_mut()
+        {
+            last.kind = PinKind::PowerIn;
+        }
+        s.symbols.insert(supply).expect("symbol");
+        if let Some(sheet) = s.sheets.get_mut(SheetId::from_u128(2))
+            && let Some(port) = sheet.power_ports.get_mut(id(14))
+        {
+            port.symbol = Some(SymbolId::from_u128(77));
+        }
+        assert_eq!(s.validate(), Ok(()));
 
         let mut s = sample();
         if let Some(symbol) = s.symbols.get_mut(resistor) {

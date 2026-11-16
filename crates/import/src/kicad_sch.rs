@@ -44,14 +44,15 @@ const MAX_TOTAL_UNITS: usize = circuitcraft_model::MAX_ITEMS;
 
 /// Reads a KiCad schematic from the text of its top file. `name` becomes the schematic's name
 /// and the top sheet's. `open` is asked for the text of each file a sheet symbol names, by the
-/// name the sheet symbol gives it (usually relative to the top file's folder, with `/` between
-/// folders and no leading `./`); a file it can't give is noted and its sheet left empty. Two
-/// names for one file are two sheets, and a sheet symbol naming the top file is read as a sheet
-/// of its own once, so `open` should give nothing for the top file's own name. No file is ever
-/// written.
+/// name the sheet symbol gives it, with `/` between folders and no leading `./` (what the name
+/// is relative to is the caller's to decide); a file it can't give is noted and its sheet left
+/// empty. Two names for one file are two sheets, and a sheet symbol naming the top file is read
+/// as a sheet of its own once, so `open` should give nothing for the top file's own name. No
+/// file is ever written.
 pub fn read_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Option<String>) -> Result<ImportedSchematic, ImportError> {
     let name = if name.trim().is_empty() { "Imported" } else { name };
     let name: String = name.chars().take(MAX_NAME_CHARS).collect();
+    within_limit(text.len())?;
     let mut reader = Project::new(text, &name);
     reader.legacy = legacy_designators(text)?;
     let top = reader.next_sheet_id();
@@ -68,9 +69,7 @@ pub fn read_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Opti
             match open(&pending.file) {
                 Some(t) => {
                     bytes = bytes.saturating_add(t.len());
-                    if bytes > MAX_SCHEMATIC_BYTES {
-                        return Err(ImportError::unsupported("the schematic's files add up to more than 1 GiB"));
-                    }
+                    within_limit(bytes)?;
                     owned = t;
                     owned.as_str()
                 }
@@ -85,6 +84,11 @@ pub fn read_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Opti
         reader.read_file(source, &pending)?;
     }
     reader.finish()
+}
+
+/// Refuses a schematic whose files, read so far, add up to more than [`MAX_SCHEMATIC_BYTES`].
+fn within_limit(bytes: usize) -> Result<(), ImportError> {
+    if bytes > MAX_SCHEMATIC_BYTES { Err(ImportError::unsupported("the schematic's files add up to more than 1 GiB")) } else { Ok(()) }
 }
 
 /// A sheet file waiting to be read.
@@ -139,8 +143,8 @@ struct Project {
     /// Components by designator, for the units of one component on several sheets, with their
     /// field names.
     designators: BTreeMap<String, (ComponentRef, SymbolId, BTreeSet<String>)>,
-    /// KiCad 6's designators from the top file's `symbol_instances`, by path.
-    legacy: BTreeMap<String, String>,
+    /// KiCad 6's designators and units from the top file's `symbol_instances`, by path.
+    legacy: BTreeMap<String, (String, Option<u32>)>,
     /// Which files each file's sheet symbols name, to find a loop.
     references: BTreeMap<String, BTreeSet<String>>,
     reference_count: usize,
@@ -589,12 +593,14 @@ impl Project {
             file.sheet.power_ports.insert(port)?;
             return Ok(());
         }
-        let unit = node.child("unit").and_then(|u| u.number(0)).filter(|u| *u >= 1.0 && *u <= MAX_UNITS as f64).map_or(1, |u| u as u32);
+        // The instance record that gives the designator gives the unit too, when it has one the
+        // symbol has.
+        let (designator, recorded_unit) = self.instance(node, &file.path, &file.legacy_key(node));
+        let unit = recorded_unit.filter(|u| usize::try_from(*u).is_ok_and(|u| u <= lib.units)).or_else(|| unit_of(node)).unwrap_or(1);
         if usize::try_from(unit).map_or(true, |u| u > lib.units) {
             self.notes.add("placed symbol of a unit its symbol doesn't have left out");
             return Ok(());
         }
-        let designator = self.designator(node, &file.path, &file.legacy_key(node));
         let fitted = !node.child("dnp").is_some_and(|d| d.text(0) != Some("no"));
         let in_bom = node.child("in_bom").and_then(|b| b.text(0)) != Some("no");
         let on_board = node.child("on_board").and_then(|b| b.text(0)) != Some("no");
@@ -637,21 +643,21 @@ impl Project {
         Ok(())
     }
 
-    /// The designator a placed symbol has at the sheet's place in the tree: its instance record
-    /// for that path, else its first record (KiCad 7 and later), else the top file's record for it
-    /// (KiCad 6), else its `Reference` field. `?` when it has none.
-    fn designator(&self, node: &Node, path: &str, legacy_key: &str) -> String {
+    /// The designator a placed symbol has at the sheet's place in the tree, and the unit the same
+    /// record gives, if it gives one: its instance record for that path, else its first record
+    /// (KiCad 7 and later), else the top file's record for it (KiCad 6), else its `Reference`
+    /// field. `?` when it has none.
+    fn instance(&self, node: &Node, path: &str, legacy_key: &str) -> (String, Option<u32>) {
         let records: Vec<&Node> = node.child("instances").into_iter().flat_map(|i| i.all("project")).flat_map(|p| p.all("path")).collect();
         let here = records.iter().find(|r| r.text(0).is_some_and(|p| p.eq_ignore_ascii_case(path)));
-        let reference = here
-            .or(records.first())
-            .and_then(|r| r.child("reference"))
-            .and_then(|r| r.text(0))
-            .or_else(|| self.legacy.get(legacy_key).map(String::as_str))
-            .or_else(|| property(node, "Reference"));
+        let from_record = here.or(records.first()).and_then(|r| Some((r.child("reference")?.text(0)?, unit_of(r))));
+        let (reference, unit) = from_record
+            .or_else(|| self.legacy.get(legacy_key).map(|(r, u)| (r.as_str(), *u)))
+            .or_else(|| property(node, "Reference").map(|r| (r, None)))
+            .unzip();
         match reference.map(clip) {
-            Some(r) if !r.trim().is_empty() => r,
-            _ => "?".to_owned(),
+            Some(r) if !r.trim().is_empty() => (r, unit.flatten()),
+            _ => ("?".to_owned(), unit.flatten()),
         }
     }
 
@@ -833,7 +839,7 @@ impl File<'_> {
 /// KiCad 6's designators: the top file's `symbol_instances`, each placed symbol's designator by
 /// its path (the sheet symbols' ids down to its sheet, then its own id, each after a `/`). Later
 /// versions record them with each placed symbol instead, and have no such list.
-fn legacy_designators(text: &str) -> Result<BTreeMap<String, String>, ImportError> {
+fn legacy_designators(text: &str) -> Result<BTreeMap<String, (String, Option<u32>)>, ImportError> {
     let mut out = BTreeMap::new();
     let (mut reader, _) = Reader::open(text)?;
     while let Some(item) = reader.next_item()? {
@@ -845,10 +851,15 @@ fn legacy_designators(text: &str) -> Result<BTreeMap<String, String>, ImportErro
             if out.len() >= circuitcraft_model::MAX_ITEMS {
                 break;
             }
-            out.entry(path.to_ascii_lowercase()).or_insert_with(|| clip(reference));
+            out.entry(path.to_ascii_lowercase()).or_insert_with(|| (clip(reference), unit_of(record)));
         }
     }
     Ok(out)
+}
+
+/// The unit a node's `(unit N)` names, if it names one a symbol may have.
+fn unit_of(node: &Node) -> Option<u32> {
+    node.child("unit").and_then(|u| u.number(0)).filter(|u| *u >= 1.0 && *u <= MAX_UNITS as f64).map(|u| u as u32)
 }
 
 /// A sheet file's name as a sheet symbol gives it, with `/` between folders and no leading `./`,
@@ -1364,6 +1375,45 @@ mod tests {
         );
         let designators: Vec<&str> = read.schematic.sheets.iter().flat_map(|s| s.components.iter()).map(|c| c.designator.as_str()).collect();
         assert_eq!(designators, ["R3"]);
+    }
+
+    const DUAL: &str = r#"(symbol "L:Dual" (property "Reference" "U")
+        (symbol "Dual_1_1" (pin input line (at 0 0 0) (length 1) (name "A") (number "1")))
+        (symbol "Dual_2_1" (pin input line (at 0 0 0) (length 1) (name "B") (number "7"))))"#;
+
+    #[test]
+    fn the_unit_comes_from_the_record_that_gives_the_designator() {
+        // The symbol says unit 1; this place in the tree says U3 is unit 2 here.
+        let read = one_sheet(
+            DUAL,
+            r#"(symbol (lib_id "L:Dual") (at 10 10 0) (unit 1) (property "Reference" "U3")
+                 (instances (project "this" (path "/22222222-2222-4222-8222-222222222222" (reference "U3") (unit 2)))))
+               (symbol (lib_id "L:Dual") (at 30 10 0) (unit 2) (property "Reference" "U4")
+                 (instances (project "this" (path "/22222222-2222-4222-8222-222222222222" (reference "U4")))))
+               (symbol (lib_id "L:Dual") (at 50 10 0) (unit 2) (property "Reference" "U6")
+                 (instances (project "this" (path "/22222222-2222-4222-8222-222222222222" (reference "U6") (unit 3)))))"#,
+        );
+        let s = &read.schematic;
+        let units: BTreeMap<&str, u32> = s
+            .sheets
+            .iter()
+            .flat_map(|sheet| sheet.parts.iter())
+            .map(|p| (s.component(p.component).map_or("", |c| c.designator.as_str()), p.unit))
+            .collect();
+        // A record without a unit, or with one the symbol doesn't have, keeps the symbol's own.
+        assert_eq!(units, BTreeMap::from([("U3", 2), ("U4", 2), ("U6", 2)]));
+    }
+
+    #[test]
+    fn kicad_6_units_come_from_the_top_files_list() {
+        let text = format!(
+            r#"(kicad_sch (version 20211123) (uuid 33333333-3333-4333-8333-333333333333) (lib_symbols {DUAL})
+            (symbol (lib_id "L:Dual") (at 10 10 0) (unit 1) (uuid 44444444-4444-4444-8444-444444444444) (property "Reference" "U?"))
+            (symbol_instances (path "/44444444-4444-4444-8444-444444444444" (reference "U5") (unit 2) (value "x") (footprint ""))))"#
+        );
+        let read = read_schematic(&text, "Six", &mut |_| None).expect("import");
+        let part = read.schematic.sheets.iter().flat_map(|s| s.parts.iter()).next().expect("part");
+        assert_eq!(part.unit, 2);
     }
 
     #[test]
