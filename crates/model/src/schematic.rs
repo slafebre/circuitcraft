@@ -1164,6 +1164,33 @@ mod tests {
     }
 
     #[test]
+    fn many_ports_sharing_a_big_supply_symbol_are_checked_quickly() {
+        // A symbol with the most pins a unit may have, its power input last, drawn by many ports.
+        // Scanning its pins for every port would be thirty billion steps (about 20 s on a fast
+        // machine); checking each symbol once is a small part of a second.
+        let mut s = sample();
+        let mut supply = s.symbols.iter().next().cloned().expect("symbol");
+        supply.id = SymbolId::from_u128(77);
+        supply.name = "VCC".to_owned();
+        let template = supply.units.first().and_then(|u| u.pins.first()).cloned().expect("pin");
+        let pins: Vec<Pin> = (0..MAX_PINS)
+            .map(|i| Pin { number: i.to_string(), kind: if i + 1 == MAX_PINS { PinKind::PowerIn } else { PinKind::Passive }, ..template.clone() })
+            .collect();
+        if let Some(unit) = supply.units.first_mut() {
+            unit.pins = pins;
+        }
+        s.symbols.insert(supply).expect("symbol");
+        let sheet = s.sheets.get_mut(SheetId::from_u128(2)).expect("sheet");
+        let port = sheet.power_ports.get(id(14)).cloned().expect("port");
+        for n in 0..300_000 {
+            sheet.power_ports.insert(PowerPort { id: id(1_000 + n), symbol: Some(SymbolId::from_u128(77)), ..port.clone() }).expect("port");
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(s.validate(), Ok(()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "validate took {:?}", started.elapsed());
+    }
+
+    #[test]
     fn what_json_could_not_hold_is_refused() {
         // Lists longer than reading the schematic back allows.
         let mut s = sample();
