@@ -7,6 +7,7 @@ mod bundle;
 mod corpus;
 mod layers;
 mod licenses;
+mod package;
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -21,7 +22,7 @@ commands:
   licenses check every dependency's licence against the allowlist (xtask/src/licenses.rs)
   wasm     check that the browser build compiles
   package  check that the crates other programs use still package and build on their own (needs
-           a network, or the crates.io index already in cargo's cache)
+           git, and a network or the crates.io index already in cargo's cache)
   bundle   build dist/CircuitCraft.app, a macOS app bundle for this machine (signed ad hoc)
   corpus   fetch the public boards pinned in corpus/manifest.json into target/corpus, import each
            and compare it with the manifest (needs curl and a network; --offline uses what is
@@ -133,21 +134,8 @@ fn cmd_wasm() -> Result<(), String> {
     run(c, "cargo check --target wasm32-unknown-unknown (libraries and circuitcraft-web)")
 }
 
-/// The crates published on crates.io for other programs (AGENTS.md, "Crates other programs use").
-const PUBLISHED: &[&str] = &["circuitcraft-units", "circuitcraft-geom", "circuitcraft-model", "circuitcraft-import"];
-
-/// Packages each published crate and builds it from its package alone, the way `cargo publish`
-/// would, without publishing anything. It reads the crates.io index, so it needs a network or
-/// cargo's cached copy of the index. This catches what only shows up there: a dependency on a
-/// crate that isn't published, or a file the package leaves out. Changes not yet committed are
-/// packaged too, so the check runs before a commit.
 fn cmd_package() -> Result<(), String> {
-    let mut c = cargo();
-    c.args(["package", "--allow-dirty", "--quiet"]);
-    for p in PUBLISHED {
-        c.args(["-p", p]);
-    }
-    run(c, "cargo package (the published crates)")
+    package::run(&root())
 }
 
 type Step = (&'static str, fn() -> Result<(), String>);
