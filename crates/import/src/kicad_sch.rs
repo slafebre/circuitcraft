@@ -50,6 +50,14 @@ const MAX_TOTAL_UNITS: usize = circuitcraft_model::MAX_ITEMS;
 /// as a sheet of its own once, so `open` should give nothing for the top file's own name. No
 /// file is ever written.
 pub fn read_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Option<String>) -> Result<ImportedSchematic, ImportError> {
+    read_within(text, name, open, MAX_SCHEMATIC_BYTES)
+}
+
+/// [`read_schematic`], refusing files that add up to more than `max_bytes`.
+fn read_within(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Option<String>, max_bytes: usize) -> Result<ImportedSchematic, ImportError> {
+    let within_limit = |bytes: usize| {
+        if bytes > max_bytes { Err(ImportError::unsupported("the schematic's files add up to more than 1 GiB")) } else { Ok(()) }
+    };
     let name = if name.trim().is_empty() { "Imported" } else { name };
     let name: String = name.chars().take(MAX_NAME_CHARS).collect();
     within_limit(text.len())?;
@@ -84,11 +92,6 @@ pub fn read_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Opti
         reader.read_file(source, &pending)?;
     }
     reader.finish()
-}
-
-/// Refuses a schematic whose files, read so far, add up to more than [`MAX_SCHEMATIC_BYTES`].
-fn within_limit(bytes: usize) -> Result<(), ImportError> {
-    if bytes > MAX_SCHEMATIC_BYTES { Err(ImportError::unsupported("the schematic's files add up to more than 1 GiB")) } else { Ok(()) }
 }
 
 /// A sheet file waiting to be read.
@@ -1266,6 +1269,28 @@ mod tests {
             .map(|(i, f)| format!("(sheet (at {} 10) (size 10 10) (uuid 00000000-0000-4000-8000-00000000000{i}) (property \"Sheetname\" \"S{i}\") (property \"Sheetfile\" \"{f}\"))", 20 * i))
             .collect();
         format!("(kicad_sch (version 20231120) (uuid 11111111-1111-4111-8111-111111111111) {sheets})")
+    }
+
+    #[test]
+    fn files_beyond_the_size_limit_are_refused() {
+        let top = top_with(&["a.kicad_sch"]);
+        let child = "(kicad_sch (version 20231120))";
+        let refused = |r: Result<ImportedSchematic, ImportError>| matches!(r, Err(ImportError::Unsupported(m)) if m.contains("add up to more than"));
+        // The top file alone, before anything else is read.
+        let mut asked = false;
+        assert!(refused(read_within(
+            &top,
+            "Top",
+            &mut |_| {
+                asked = true;
+                None
+            },
+            top.len() - 1
+        )));
+        assert!(!asked, "an oversized top file is refused before a sheet file is asked for");
+        // The top file and a sheet file together.
+        assert!(refused(read_within(&top, "Top", &mut |_| Some(child.to_owned()), top.len() + child.len() - 1)));
+        assert!(read_within(&top, "Top", &mut |_| Some(child.to_owned()), top.len() + child.len()).is_ok());
     }
 
     #[test]
