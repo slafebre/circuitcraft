@@ -83,7 +83,7 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
   shortcuts, the CLI, the control channel and MCP all reach the same commands.
 - **Programmatic calls never open dialogs.** A JSON call runs with defaults.
 - **Layering** is enforced by `cargo xtask layers` (table in `xtask/src/layers.rs`):
-  L0 `units`, `geom` → L1 `model` → L2 `library`, `rules`, `render` → L3 `drc`, `pour`, `router`,
+  L0 `units`, `geom` → L1 `model` → L2 `library`, `import`, `rules`, `render` → L3 `drc`, `pour`, `router`,
   `io`, `sim` → L4 `engine` → L5 `ui-egui`, `mcp` → apps. Nothing below L5 depends on egui,
   eframe, winit, wgpu or rfd. **The UI crate is swappable.**
 - **The UI is thin.** Panels read engine state and act only through `Session::execute`. The
@@ -100,11 +100,16 @@ People trust CircuitCraft with their designs; a crash loses their work. This out
   one item per line. Every file starts with `format` and `version`; a newer version is refused,
   not guessed at, and so is a field that is missing or unknown. Item and net ids are random UUIDs, so branches never hand out the same id.
   Reader and writer: `crates/io/src/native.rs`.
+- **Crates other programs use.** `units`, `geom`, `model` and `import` (the KiCad and EAGLE
+  readers) are published on crates.io for other programs to build on, so their public API is a
+  promise: a change that breaks it gets a new version and a line in the crate's README. They
+  stay free of the session, storage and anything app-specific, and every one of them builds for
+  wasm. Publishing a version needs the maintainer's yes.
 
 ## Quality gate
 
 Before every commit: `cargo xtask ci` (fmt, clippy with `-D warnings`, tests, assets, licences,
-layers, wasm). Commit after each piece of work that builds.
+layers, wasm, packaging of the published crates). Commit after each piece of work that builds.
 
 ## Running it
 

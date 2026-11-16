@@ -661,6 +661,7 @@ name = "circuitcraft-engine"
 version = "0.0.1"
 dependencies = [
  "circuitcraft-geom",
+ "circuitcraft-import",
  "circuitcraft-io",
  "circuitcraft-model",
  "circuitcraft-render",
@@ -685,10 +686,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "circuitcraft-import"
+version = "0.0.1"
+dependencies = [
+ "circuitcraft-geom",
+ "circuitcraft-model",
+ "circuitcraft-units",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "circuitcraft-io"
 version = "0.0.1"
 dependencies = [
  "circuitcraft-geom",
+ "circuitcraft-import",
  "circuitcraft-model",
  "circuitcraft-units",
  "flate2",
@@ -4591,7 +4604,7 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "circuitcraft-geom",
- "circuitcraft-io",
+ "circuitcraft-import",
  "circuitcraft-model",
  "circuitcraft-render",
  "circuitcraft-units",

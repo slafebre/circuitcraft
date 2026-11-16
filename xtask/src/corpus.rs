@@ -149,7 +149,7 @@ fn check(root: &Path, entry: &Entry, offline: bool) -> Result<Map<String, Value>
         return Err(format!("checksum {found}, expected {}; delete {} to fetch it again", entry.sha256, file.display()));
     }
     let text = String::from_utf8_lossy(&bytes);
-    let imported = circuitcraft_io::import_board(&text, &entry.name).map_err(|e| format!("import failed: {e}"))?;
+    let imported = circuitcraft_import::import_board(&text, &entry.name).map_err(|e| format!("import failed: {e}"))?;
     let counts = counts(&imported.board);
     match &entry.counts {
         Some(expected) if *expected == counts => {}
@@ -546,7 +546,7 @@ mod tests {
   (segment (start 0 0) (end 40.9 10) (width 0.2) (layer \"F.Cu\") (net 3))
   (segment (start 0 0) (end 40 5) (width 0.2) (layer \"B.Cu\") (net 4)))";
         let reached = |text: &str| {
-            let board = circuitcraft_io::import_board(text, "x").expect("import").board;
+            let board = circuitcraft_import::import_board(text, "x").expect("import").board;
             (counts(&board).get("pads").cloned(), counts(&board).get("pads_reached").cloned())
         };
         // Pad 1 of the first footprint is at (12, 9) on the board, a millimetre square: the first

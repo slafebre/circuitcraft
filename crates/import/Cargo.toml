@@ -1,0 +1,23 @@
+[package]
+name = "circuitcraft-import"
+description = "Read KiCad and EAGLE board files into a validated board model: hostile-input safe, no panics, integer nanometres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["pcb", "kicad", "eagle", "eda", "import"]
+categories = ["parser-implementations", "science"]
+
+[lints]
+workspace = true
+
+[dependencies]
+circuitcraft-units = { workspace = true }
+circuitcraft-geom = { workspace = true }
+circuitcraft-model = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

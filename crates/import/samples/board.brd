@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE eagle SYSTEM "eagle.dtd">
+<eagle version="9.6.2">
+<drawing>
+<settings><setting alwaysvectorfont="no"/></settings>
+<grid distance="0.1" unitdist="inch" unit="inch"/>
+<layers>
+<layer number="1" name="Top" color="4" fill="1" visible="yes" active="yes"/>
+<layer number="16" name="Bottom" color="1" fill="1" visible="yes" active="yes"/>
+<layer number="20" name="Dimension" color="15" fill="1" visible="yes" active="yes"/>
+<layer number="21" name="tPlace" color="7" fill="1" visible="yes" active="yes"/>
+<layer number="47" name="Measures" color="7" fill="1" visible="yes" active="yes"/>
+</layers>
+<board>
+<plain>
+<wire x1="0" y1="0" x2="30" y2="0" width="0" layer="20"/>
+<wire x1="30" y1="0" x2="30" y2="18" width="0" layer="20"/>
+<wire x1="30" y1="18" x2="28" y2="20" width="0" layer="20" curve="90"/>
+<wire x1="28" y1="20" x2="0" y2="20" width="0" layer="20"/>
+<wire x1="0" y1="20" x2="0" y2="0" width="0" layer="20"/>
+<wire x1="0" y1="0" x2="0" y2="20" width="0" layer="20"/>
+<text x="2" y="2" size="1.27" layer="21" ratio="10" rot="R90" align="center">Rev &amp; 1</text>
+<hole x="3" y="3" drill="3.2"/>
+<wire x1="1" y1="1" x2="2" y2="1" width="0.1" layer="47"/>
+<rectangle x1="10" y1="10" x2="12" y2="11" layer="43"/>
+<dimension x1="0" y1="0" x2="1" y2="1" x3="2" y3="2" layer="47"/>
+</plain>
+<libraries>
+<library name="parts">
+<packages>
+<package name="R0603">
+<description>Chip &lt;b&gt;resistor&lt;/b&gt;</description>
+<smd name="1" x="-0.8" y="0" dx="0.9" dy="1" layer="1"/>
+<smd name="2" x="0.8" y="0" dx="0.9" dy="1" layer="1" roundness="50" stop="no" cream="no"/>
+<wire x1="-1" y1="0.6" x2="1" y2="0.6" width="0.127" layer="21"/>
+<text x="0" y="1" size="1" layer="25" align="bottom-center">&gt;NAME</text>
+<text x="0" y="-2" size="1" layer="27">&gt;VALUE</text>
+</package>
+<package name="HDR">
+<pad name="A" x="0" y="0" drill="1"/>
+<pad name="B" x="2.54" y="0" drill="1" diameter="1.9" shape="long" rot="R90"/>
+<pad name="C" x="5.08" y="0" drill="1" diameter="1.9" shape="octagon" stop="no"/>
+<hole x="8" y="0" drill="2"/>
+<rectangle x1="-1" y1="-1" x2="1" y2="1" layer="51"/>
+<circle x="0" y="0" radius="0.5" width="0" layer="21"/>
+<text x="0" y="2" size="1" layer="25">&gt;NAME</text>
+<text x="0" y="-3" size="1" layer="21">PIN 1</text>
+</package>
+</packages>
+</library>
+</libraries>
+<designrules name="demo">
+<param name="layerSetup" value="(1*16)"/>
+<param name="mdWireWire" value="6mil"/>
+<param name="rvPadTop" value="0.25"/>
+<param name="rlMinPadTop" value="10mil"/>
+<param name="rlMaxPadTop" value="20mil"/>
+<param name="rvViaOuter" value="0.25"/>
+<param name="rlMinViaOuter" value="8mil"/>
+<param name="rlMaxViaOuter" value="20mil"/>
+<param name="mvStopFrame" value="1"/>
+<param name="mlMinStopFrame" value="4mil"/>
+<param name="mlMaxStopFrame" value="4mil"/>
+<param name="mvCreamFrame" value="0"/>
+<param name="mlMinCreamFrame" value="0mil"/>
+<param name="mlMaxCreamFrame" value="0mil"/>
+<param name="mlViaStopLimit" value="0.5mm"/>
+<param name="slThermalIsolate" value="10mil"/>
+</designrules>
+<elements>
+<element name="R1" library="parts" package="R0603" value="10k" x="10" y="5" rot="R90"/>
+<element name="J1" library="parts" package="HDR" value="" x="20" y="5" smashed="yes" rot="MR0">
+<attribute name="NAME" x="20" y="8" size="1" layer="26" rot="MR0"/>
+<attribute name="PROD_ID" value="X-1" x="20" y="5" size="1" layer="27" display="off"/>
+</element>
+<element name="X9" library="parts" package="MISSING" value="" x="0" y="0"/>
+</elements>
+<signals>
+<signal name="GND">
+<contactref element="R1" pad="1"/>
+<contactref element="J1" pad="A"/>
+<wire x1="10" y1="4.2" x2="20" y2="5" width="0.25" layer="1"/>
+<wire x1="20" y1="5" x2="22" y2="7" width="0.25" layer="16" curve="-90"/>
+<wire x1="10" y1="4.2" x2="20" y2="5" width="0" layer="19"/>
+<via x="20" y="5" extent="1-16" drill="0.4"/>
+<via x="25" y="5" extent="1-16" drill="0.8" diameter="1.6" alwaysstop="yes"/>
+<polygon width="0.3" layer="16" isolate="0.4" rank="2" thermals="yes">
+<vertex x="1" y="1"/>
+<vertex x="29" y="1"/>
+<vertex x="29" y="19" curve="90"/>
+<vertex x="1" y="19"/>
+</polygon>
+<polygon width="0.2" layer="1" pour="cutout">
+<vertex x="5" y="5"/>
+<vertex x="8" y="5"/>
+<vertex x="8" y="8"/>
+</polygon>
+</signal>
+</signals>
+</board>
+</drawing>
+</eagle>

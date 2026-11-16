@@ -11,9 +11,10 @@ repository = "https://github.com/slafebre/circuitcraft"
 
 [workspace.dependencies]
 # internal (layers are enforced by `cargo xtask layers`; see xtask/src/layers.rs)
-circuitcraft-units = { path = "crates/units" }
-circuitcraft-geom = { path = "crates/geom" }
-circuitcraft-model = { path = "crates/model" }
+circuitcraft-units = { path = "crates/units", version = "0.0.1" }
+circuitcraft-geom = { path = "crates/geom", version = "0.0.1" }
+circuitcraft-model = { path = "crates/model", version = "0.0.1" }
+circuitcraft-import = { path = "crates/import", version = "0.0.1" }
 circuitcraft-render = { path = "crates/render" }
 circuitcraft-io = { path = "crates/io" }
 circuitcraft-engine = { path = "crates/engine" }
