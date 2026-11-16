@@ -26,8 +26,10 @@ pub enum Format {
     Eagle,
     /// KiCad board (`(kicad_pcb …)`).
     KicadPcb,
-    /// KiCad schematic (`(kicad_sch …)`).
+    /// KiCad schematic (`(kicad_sch …)`), as KiCad 6 and later write it.
     KicadSch,
+    /// KiCad 5 schematic (`.sch`), recognised but not read.
+    KicadLegacySch,
     /// KiCad symbol library (`(kicad_symbol_lib …)`).
     KicadSymbolLib,
     /// KiCad footprint (`(footprint …)` or the older `(module …)`).
@@ -43,6 +45,7 @@ impl Format {
             Format::Eagle => circuitcraft_import::Format::Eagle.name(),
             Format::KicadPcb => circuitcraft_import::Format::KicadPcb.name(),
             Format::KicadSch => circuitcraft_import::Format::KicadSch.name(),
+            Format::KicadLegacySch => circuitcraft_import::Format::KicadLegacySch.name(),
             Format::KicadSymbolLib => circuitcraft_import::Format::KicadSymbolLib.name(),
             Format::KicadFootprint => circuitcraft_import::Format::KicadFootprint.name(),
         }
@@ -55,6 +58,7 @@ impl From<circuitcraft_import::Format> for Format {
             circuitcraft_import::Format::Eagle => Format::Eagle,
             circuitcraft_import::Format::KicadPcb => Format::KicadPcb,
             circuitcraft_import::Format::KicadSch => Format::KicadSch,
+            circuitcraft_import::Format::KicadLegacySch => Format::KicadLegacySch,
             circuitcraft_import::Format::KicadSymbolLib => Format::KicadSymbolLib,
             circuitcraft_import::Format::KicadFootprint => Format::KicadFootprint,
         }
@@ -101,6 +105,7 @@ mod tests {
             (circuitcraft_import::Format::Eagle, Format::Eagle),
             (circuitcraft_import::Format::KicadPcb, Format::KicadPcb),
             (circuitcraft_import::Format::KicadSch, Format::KicadSch),
+            (circuitcraft_import::Format::KicadLegacySch, Format::KicadLegacySch),
             (circuitcraft_import::Format::KicadSymbolLib, Format::KicadSymbolLib),
             (circuitcraft_import::Format::KicadFootprint, Format::KicadFootprint),
         ] {

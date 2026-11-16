@@ -7,6 +7,7 @@
 //! has passed [`Board::validate`].
 
 use circuitcraft_geom::{Arc, Contour, Edge};
+use circuitcraft_model::schematic::Schematic;
 use circuitcraft_model::{
     Board, Footprint, GraphicShape, ItemId, Layer, LayerId, LayerKind, LayerStack, MAX_LAYERS, MAX_OUTLINE_GAP, ModelError, NetId, Rotation, Side,
 };
@@ -18,6 +19,15 @@ use std::collections::BTreeMap;
 pub struct Imported {
     /// The board; it passes [`Board::validate`].
     pub board: Board,
+    /// What the reader left out or approximated.
+    pub notes: Notes,
+}
+
+/// A schematic read from another program's files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedSchematic {
+    /// The schematic; it passes [`Schematic::validate`].
+    pub schematic: Schematic,
     /// What the reader left out or approximated.
     pub notes: Notes,
 }

@@ -20,7 +20,7 @@ pub(crate) fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d:
 }
 
 /// 128 fresh random bits as a version 4 UUID; an error, never a panic, if the system has none.
-fn random_uuid() -> Result<Uuid, ModelError> {
+pub(crate) fn random_uuid() -> Result<Uuid, ModelError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|e| ModelError::NoRandomness(e.to_string()))?;
     Ok(uuid::Builder::from_random_bytes(bytes).into_uuid())
@@ -74,6 +74,9 @@ macro_rules! id_type {
         }
     };
 }
+
+/// The schematic's id types are made the same way.
+pub(crate) use id_type;
 
 id_type!(
     /// The identity of a board item, stable for its life and unique within the board.
