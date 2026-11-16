@@ -8,6 +8,8 @@
 //! An edit runs inside [`Document::edit`] and changes the board through a [`BoardEdit`], whose
 //! methods check what they add and record what they change ([`Board::validate`] checks a whole
 //! board, for example one just read from a file). Everything is in whole nanometres.
+//!
+//! A [`schematic::Schematic`] holds a project's sheets and one copy of each symbol they use.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod change;
@@ -15,6 +17,7 @@ mod document;
 mod items;
 mod layer;
 mod outline;
+pub mod schematic;
 mod store;
 
 pub use change::{BoardEdit, ChangeSet};

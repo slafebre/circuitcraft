@@ -1,7 +1,7 @@
 # circuitcraft-model
 
 The design database of [CircuitCraft](https://github.com/slafebre/circuitcraft): a printed
-circuit board as plain Rust data, with validation and undo.
+circuit board and a schematic as plain Rust data, with validation, and undo for the board.
 
 A `Board` holds its design settings, layer stack, outline and cutouts, nets, and its items:
 footprints with pads, tracks, vias, copper zones, keepouts, holes, text and drawings. The
@@ -10,6 +10,11 @@ board's fields are public, its items are read through `get` and `iter`, and its 
 its own types. `Board::validate` checks a whole board,
 for example one read from a file; `Document` keeps a board with undo and redo, recording what
 each edit changed rather than a copy of the board.
+
+A `schematic::Schematic` holds a project's sheets and one copy of each symbol they use: on
+each sheet, components drawn as one part per unit, wires, buses, junctions, net labels and
+ports, power ports, no-connect markers, sheet symbols, text and drawings, checked by
+`Schematic::validate`.
 
 It is published on its own as the type that
 [`circuitcraft-import`](https://crates.io/crates/circuitcraft-import) returns.

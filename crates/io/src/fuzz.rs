@@ -1,4 +1,4 @@
-//! Fuzz tests for every file reader: thousands of damaged copies of good files, made from a
+//! Fuzz tests for every file reader, boards and schematics: thousands of damaged copies of good files, made from a
 //! fixed seed so every run and every machine tries the same ones.
 //!
 //! What must hold for each: the reader returns a board or an error, never a panic or a hang; a
@@ -13,6 +13,8 @@ use circuitcraft_model::Board;
 const KICAD_BOARD: &str = include_str!("../../import/samples/board.kicad_pcb");
 const KICAD_OLD: &str = include_str!("../../import/samples/old.kicad_pcb");
 const EAGLE_BOARD: &str = include_str!("../../import/samples/board.brd");
+const KICAD_SCHEMATIC: &str = include_str!("../../import/samples/schematic.kicad_sch");
+const KICAD_SHEET: &str = include_str!("../../import/samples/amplifier.kicad_sch");
 
 /// A small random number generator (xorshift64*), seeded per test.
 struct Random(u64);
@@ -235,4 +237,34 @@ fn damaged_files_of_any_kind_are_told_apart_or_not_at_all() {
             }
         }
     }
+}
+
+/// A schematic that came out of a reader: valid, and the same after a trip through JSON. (The
+/// native schematic format comes with the schematic editor; JSON holds the same fields.)
+fn schematic_holds_up(s: &circuitcraft_model::schematic::Schematic, what: &str) {
+    assert_eq!(s.validate(), Ok(()), "{what}: an invalid schematic came out");
+    let json = serde_json::to_string(s).unwrap_or_else(|e| panic!("{what}: can't be written: {e}"));
+    let back: circuitcraft_model::schematic::Schematic =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{what}: written but can't be read: {e}"));
+    assert!(back == *s, "{what}: changed by a trip through JSON");
+}
+
+#[test]
+fn damaged_kicad_schematics_are_read_or_refused() {
+    let mut random = Random(0x5eed_0006);
+    let mut read_fine = 0;
+    for round in 0..3_000 {
+        // Damage the top file, the sheet below, or both.
+        let (top, sheet) = match round % 3 {
+            0 => (damaged(KICAD_SCHEMATIC, &mut random), KICAD_SHEET.to_owned()),
+            1 => (KICAD_SCHEMATIC.to_owned(), damaged(KICAD_SHEET, &mut random)),
+            _ => (damaged(KICAD_SCHEMATIC, &mut random), damaged(KICAD_SHEET, &mut random)),
+        };
+        if let Ok(read) = kicad::read_schematic(&top, "fuzz", &mut |_| Some(sheet.clone())) {
+            read_fine += 1;
+            schematic_holds_up(&read.schematic, &format!("round {round}"));
+        }
+    }
+    // Like a board, a schematic keeps what it can read: a third of the damaged files must.
+    assert!(read_fine > 1_000, "only {read_fine} of 3,000 damaged schematics still read");
 }

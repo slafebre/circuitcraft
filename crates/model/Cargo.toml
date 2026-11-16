@@ -1,6 +1,6 @@
 [package]
 name = "circuitcraft-model"
-description = "The design database: project, board, layer stack"
+description = "The design database: board, layer stack, schematic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

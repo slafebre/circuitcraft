@@ -1,4 +1,5 @@
-//! Reads boards that KiCad and EAGLE wrote into CircuitCraft's board model
+//! Reads boards that KiCad and EAGLE wrote into CircuitCraft's board model, and KiCad
+//! schematics into its schematic model ([`import_schematic`]). Boards go into its board model
 //! ([`circuitcraft_model::Board`]): lengths in integer nanometres, arcs exact, every footprint's
 //! pads, texts and drawings placed on the board, and a board that has passed
 //! [`Board::validate`](circuitcraft_model::Board::validate).
@@ -29,10 +30,11 @@
 pub mod eagle;
 mod import;
 pub mod kicad;
+mod kicad_sch;
 mod sexp;
 mod xml;
 
-pub use import::{ImportError, Imported, MAX_NOTES, Notes};
+pub use import::{ImportError, Imported, ImportedSchematic, MAX_NOTES, Notes};
 
 /// Reads a board another program wrote, telling which by its content. `name` becomes the
 /// board's name. The file it came from is never written.
@@ -44,10 +46,25 @@ pub fn import_board(text: &str, name: &str) -> Result<Imported, ImportError> {
     }
 }
 
+/// Reads a schematic another program wrote, telling which by the content of its top file.
+/// `name` becomes the schematic's name. `open` is asked for the text of each further file the
+/// schematic names (a KiCad sheet's file, by the name the sheet symbol gives it); a file it
+/// can't give is noted and its sheet left empty. No file is ever written.
+pub fn import_schematic(text: &str, name: &str, open: &mut dyn FnMut(&str) -> Option<String>) -> Result<ImportedSchematic, ImportError> {
+    match detect(text.as_bytes()) {
+        Some(Format::KicadSch) => kicad::read_schematic(text, name, open),
+        Some(Format::KicadLegacySch) => {
+            Err(ImportError::Unsupported("KiCad 5 schematics (`.sch`) are not read: open and save it in KiCad 6 or later first".to_owned()))
+        }
+        Some(Format::Eagle) => Err(ImportError::Unsupported("EAGLE schematics are not read yet".to_owned())),
+        _ => Err(ImportError::WrongFormat("a KiCad schematic")),
+    }
+}
+
 /// How many bytes [`detect`] looks at.
 pub const SNIFF_LEN: usize = 4096;
 
-/// A file format of another program that [`detect`] recognises. Only boards are read so far;
+/// A file format of another program that [`detect`] recognises. Boards and KiCad schematics are read;
 /// the others are recognised so that a caller can say what a file is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
@@ -55,8 +72,10 @@ pub enum Format {
     Eagle,
     /// KiCad board (`(kicad_pcb …)`).
     KicadPcb,
-    /// KiCad schematic (`(kicad_sch …)`).
+    /// KiCad schematic (`(kicad_sch …)`), as KiCad 6 and later write it.
     KicadSch,
+    /// KiCad 5 schematic (`.sch`, `EESchema Schematic File …`), recognised but not read.
+    KicadLegacySch,
     /// KiCad symbol library (`(kicad_symbol_lib …)`).
     KicadSymbolLib,
     /// KiCad footprint (`(footprint …)` or the older `(module …)`).
@@ -70,6 +89,7 @@ impl Format {
             Format::Eagle => "EAGLE",
             Format::KicadPcb => "KiCad board",
             Format::KicadSch => "KiCad schematic",
+            Format::KicadLegacySch => "KiCad 5 schematic",
             Format::KicadSymbolLib => "KiCad symbol library",
             Format::KicadFootprint => "KiCad footprint",
         }
@@ -91,6 +111,9 @@ pub fn detect(bytes: &[u8]) -> Option<Format> {
             "footprint" | "module" => Some(Format::KicadFootprint),
             _ => None,
         };
+    }
+    if text.starts_with("EESchema Schematic File") {
+        return Some(Format::KicadLegacySch);
     }
     if text.starts_with('<') && has_eagle_root(text) {
         return Some(Format::Eagle);
@@ -118,6 +141,7 @@ mod tests {
         assert_eq!(detect(b"(kicad_symbol_lib)"), Some(Format::KicadSymbolLib));
         assert_eq!(detect(b"(footprint \"R_0603\")"), Some(Format::KicadFootprint));
         assert_eq!(detect(b"(something_else)"), None);
+        assert_eq!(detect(b"EESchema Schematic File Version 4\nEELAYER 30 0\n"), Some(Format::KicadLegacySch));
     }
 
     #[test]
