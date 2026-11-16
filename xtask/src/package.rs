@@ -38,11 +38,12 @@ pub fn run(root: &Path) -> Result<(), String> {
 
     let name = format!("{:016x}", fingerprint(root, &package_files(root)?)?);
     let target = base.join(&name);
+    // Only folders this step made, named as `name` is, are renamed or removed.
     let others: Vec<PathBuf> = std::fs::read_dir(&base)
         .map_err(|e| format!("can't list {}: {e}", base.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && *p != target)
+        .filter(|p| p.is_dir() && *p != target && p.file_name().and_then(|n| n.to_str()).is_some_and(is_state_name))
         .collect();
     let mut others = others.into_iter();
     if !target.exists()
@@ -62,6 +63,11 @@ pub fn run(root: &Path) -> Result<(), String> {
         c.args(["-p", p]);
     }
     crate::run(c, "cargo package (the published crates)")
+}
+
+/// Whether a folder name is one a state of the published crates gets: 16 hexadecimal digits.
+fn is_state_name(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The files the packages are made from, as git lists them (tracked, or new and not ignored,
@@ -117,8 +123,8 @@ mod tests {
 
     #[test]
     fn the_fingerprint_follows_names_and_contents() {
-        let dir = std::env::temp_dir().join(format!("circuitcraft-xtask-package-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let scratch = TempDir::new("fingerprint");
+        let dir = scratch.0.clone();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src").join("lib.rs"), "pub fn a() {}").unwrap();
         let print = |files: &[&str]| fingerprint(&dir, &files.iter().map(PathBuf::from).collect::<Vec<_>>()).unwrap();
@@ -131,7 +137,32 @@ mod tests {
         std::fs::rename(dir.join("src").join("lib.rs"), dir.join("src").join("main.rs")).unwrap();
         assert_ne!(print(&["src/main.rs"]), changed, "so is a renamed file");
         assert_ne!(print(&["src/lib.rs"]), changed, "and a deleted one");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_folders_named_like_a_state_are_touched() {
+        assert!(is_state_name("0123456789abcdef"));
+        assert!(!is_state_name("lock"));
+        assert!(!is_state_name("0123456789abcdeg"));
+        assert!(!is_state_name("0123456789abcdef0"));
+    }
+
+    /// A scratch folder of this test's own, removed when the test ends, whether it passes or not.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("circuitcraft-xtask-package-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
