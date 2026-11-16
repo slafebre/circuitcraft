@@ -2,7 +2,7 @@
 
 **Stage: 0.1 in progress** (workspace scaffold done) · next: the 0.1 gate (foundations and board viewer)
 
-> **Last updated:** 2026-11-14 · **Target:** the current Altium Designer release (the exact
+> **Last updated:** 2026-11-15 · **Target:** the current Altium Designer release (the exact
 > version is recorded when black-box observation starts)
 
 CircuitCraft aims at the Altium Designer workflow for schematic capture and PCB layout, starting
@@ -71,25 +71,31 @@ headless render matches the checksum of a render a person has reviewed.
 
 ### 0.3 Schematic capture
 
+The compile pipeline is planned step by step in [docs/project-compile.md](docs/project-compile.md)
+(steps C0 to C12). It is built headless first, on imported schematics, so agents and the CLI can
+compile before the editor exists, and so every corpus schematic can be checked against its board.
+
 | Deliverable | Size |
 |---|---|
-| Schematic model: sheets, symbols, pins, wires, junctions, net labels, power ports, buses, hierarchical sheets and ports, parameters | M |
-| Project compile: nets from sheets, one stable ID per component, messages panel | M |
-| Electrical rules check with a configurable pin-connection matrix | S |
-| Annotation (designators), bill of materials v0 (CSV) | S |
+| A session holds several documents (sheets and a board), each with undo, and a command that changes two of them is one undo step (C0) | M |
+| Schematic model: sheets, components drawn as one or more parts, pins with electrical types, wires, junctions, net labels, power ports, buses, hierarchical sheets and ports, directives, no-ERC markers, parameters; `.ccsch` reader and writer, and a `.ccproj` that lists the sheets (C1, C2) | M |
+| Connectivity on a sheet and project compile: the sheet tree, net identifier scope, net naming, multi-part components, hidden power pins, one stable identity per component, messages; `project.compile` and `circuitcraft-cli compile`; each corpus schematic compiled and compared with its board (C4, C5) | L |
+| Electrical rules check with check levels and a configurable pin-connection matrix (C6) | M |
+| Annotation (designators), bill of materials v0 (CSV) (C8) | S |
 | Symbol library format and symbol editor | M |
 | Altium-style interaction: two-key shortcut sequences, Tab to edit while placing, Space to rotate, X/Y to mirror, Properties, Projects and Messages panels; EAGLE and KiCad keymaps | M |
-| EAGLE `.sch` and `.lbr`, KiCad schematic and symbol library import | M |
+| EAGLE `.sch` and `.lbr`, KiCad schematic and symbol library import; the schematic readers land first, as compile's input (C3, C7) | M |
 | Schematic PDF output | S |
 
 **Gate:** the schematic of each reference board is drawn in CircuitCraft (or imported) and
-compiles with a clean electrical rules check.
+compiles with a clean electrical rules check; every corpus schematic compiles to the components
+and pad connections of its board, apart from differences recorded in the corpus manifest.
 
 ### 0.5 Layout and fabrication: first boards
 
 | Deliverable | Size |
 |---|---|
-| Schematic-to-board sync (design changes in both directions where it makes sense), cross-probing and cross-selection | M |
+| Schematic-to-board sync: a comparator against what the last update accepted, and a reviewable change list applied as one undoable step only while both sides are as reviewed, back-annotation of designators, footprints and swapped pins, cross-probing and cross-selection, net classes and differential pairs from schematic directives (C10 to C12) | L |
 | Footprint editor and parametric footprint generator: chip passives, SOT, SOIC, SSOP, QFP, QFN, BGA, through-hole, pin headers | L |
 | Layer stack manager for 2 and 4 layers: materials, thicknesses, copper weights | S |
 | Placement: move, rotate, flip to the other side, align and distribute, ratsnest | M |
@@ -153,12 +159,17 @@ panelization, our own simulator behind the simulator interface.
 | ngspice | Check its licence for running it as an external program | 0.9 |
 | STEP library | Find a permissively licensed Rust STEP reader/writer and B-rep tessellator, or plan our own | 0.7 |
 | Altium format work | Legal advice on studying Altium files made with your own licence, before any work starts | after 1.0 |
-| Altium reference install | A licence for black-box observation, with screenshots kept out of the repository | 0.3 |
+| Altium reference install | A licence for black-box observation, with screenshots kept out of the repository. Compile's net naming rules are the first thing to check with it | 0.3 |
+| When compiling happens | Proposed: the compiled design is a pure function of the documents, cached by their revisions, so it is never stale | 0.3 |
+| What the board update compares against | Proposed: the board file saves what the last update accepted, so the comparator can tell a schematic change from a board change, and net identity follows anchors recorded there rather than a count of pads. Changes the board format | 0.5, before the comparator |
+| Corpus schematics | Proposed: pin each corpus board's schematic at the board's commit, plus a schematic-only design with hierarchical sheets and buses | 0.3 |
 
 ## Decided
 
 | Date | Decision |
 |---|---|
+| 2026-11-15 | How a footprint finds its component (decision 1 in [docs/project-compile.md](docs/project-compile.md)): a schematic component has an id of its own, apart from its placed parts, and belongs to the sheet of its first part; parts on other sheets name it by that sheet and its id. A footprint carries a component key: the path of sheet-symbol ids from the top sheet to the component's sheet, then the component id. When a key no longer matches, the board update falls back to the designator and lists the pair as a relink. The board format changes once, before repeated sheets need it |
+| 2026-11-15 | Symbol copies (decision 4 in [docs/project-compile.md](docs/project-compile.md)): a project holds one copy of each symbol it uses, with its library link and a checksum of its content, and placed parts refer to that copy, so a project compiles without its libraries and a changed symbol shows in a diff once. "Update from library" is an explicit command |
 | 2026-11-13 | The name is CircuitCraft: the repository is public under it, and the check found only small, unrelated projects using it, no EDA product or trademark |
 | 2026-11-13 | Polygon booleans and offsets use `i_overlay` (MIT OR Apache-2.0, pure Rust) with its `i64` engine on `Nm` coordinates: union, intersection, difference and XOR with fill rules, round-join offsets, deterministic integer results, builds for wasm. Its `i32` engine would cap designs at ±1.07 m. Arcs are approximated by segments; `cavalier_contours` stays an option for exact arc offsets |
 | 2026-11-13 | EAGLE import is a hand-written, read-only XML reader, written from `eagle.dtd` and real files. The DTD is CC BY-ND 3.0 with a grant for programs that read or write the format; neither the DTD nor code generated from it goes into the repository |
@@ -217,3 +228,5 @@ Once code exists, progress is measured the way the Crafting Apps measure it:
 | 2026-11-14 | The board view. The app draws the open board on the GPU: each layer's shapes are cut into triangles once, when the board or the view changes; see-through layers are merged first, so their opacity doesn't add up where shapes overlap (triangles from `i_triangle`, MIT OR Apache-2.0, built on `i_overlay`). Where the view looks is part of the session's view, set with `view.camera` and `view.fit`, so a person, the CLI and an agent move the same view: dragging pans, a mouse wheel or a pinch zooms about the pointer, two fingers on a trackpad pan (on macOS; where the system doesn't tell a trackpad from a wheel, scrolling zooms), a double click fits the board. The layer bar shows and hides layers and switches single-layer mode, and the properties panel highlights a net. File > Open… and Save As… use the system's dialogs (`rfd`, MIT); in the browser a board or a zipped project is picked, taken into a new folder in memory with `file.unpack` and saved back as a download of its project files with `file.zip` (`zip`, MIT) |
 | 2026-11-14 | Looking inside a board. `board.query` lists nets, footprints, pads, tracks, vias, zones, keepouts, holes, texts and drawings with their ids and main properties, filtered by kind, net, layer, footprint reference and a rectangle in millimetres (a straight track, via, hole, zone or keepout by its own shape, anything else by the box around it), at most 1,000 at a time and never more than 1 MiB of JSON, with the offset of the next page. `item.info` gives one item or net in full: a footprint with its assembly attributes and its pads, texts and drawings placed on the board, a zone or keepout with its outline, a net with what is on it. So an agent can find what it works on and check its edits by more than counts and pictures. Both commands only report |
 | 2026-11-14 | The control channel. `circuitcraft --control` lets agents drive the window a person has open: their commands run on the UI thread through the same `Session::execute` as the menus, are undoable, open no windows and show in the status bar, and `circuitcraft-cli mcp --connect` bridges an MCP client to the app. The browser has no sockets, so there the channel says it is not available. Left for later: turning the channel on and off from inside the app, which needs a command of its own |
+| 2026-11-14 | Project compile planned in [docs/project-compile.md](docs/project-compile.md): what compiling does, what is missing, and steps C0 to C12. 0.3 gains a session with several documents and the schematic file format, compile grows to L and lands before the editor on imported schematics, its gate compares each corpus schematic with its board, and five compile decisions are open |
+| 2026-11-15 | Decisions 1 (how a footprint finds its component) and 4 (one symbol copy per project) decided, so the schematic model can start |
