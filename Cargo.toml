@@ -39,7 +39,7 @@ uuid = { version = "1.29", default-features = false, features = ["serde"] }
 getrandom = "0.4.3"
 
 # checksums of the corpus designs that `cargo xtask corpus` fetches
-sha2 = "0.10"
+sha2 = "0.11"
 
 # geometry: polygon booleans and offsets on i64 coordinates (ROADMAP.md, decided 2026-11-13)
 i_overlay = { version = "9.1.0", default-features = false }
